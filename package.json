@@ -1,9 +1,10 @@
 {
   "name": "deepseek-detached-agent",
-  "version": "0.2.0",
-  "description": "Run DeepSeek as a detached subagent, write the final answer to Markdown, and fall back to Claude CLI.",
+  "version": "0.3.0",
+  "description": "Switchyard: a local coding-agent harness for DeepSeek, GLM, Claude, and GPT.",
   "type": "module",
   "bin": {
+    "switchyard": "./src/deepseek-watch.js",
     "ds": "./src/deepseek-watch.js",
     "dsw": "./src/deepseek-watch.js",
     "d": "./src/deepseek-watch.js",
@@ -11,7 +12,7 @@
     "dswait": "./src/wait-for-file.js"
   },
   "scripts": {
-    "check": "node --check src/api-error.js && node --check src/providers.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js",
+    "check": "node --check src/model-pricing.js && node --check src/connection-picker.js && node --check src/native-process.js && node --check src/native-backends.js && node --check src/native-chat.js && node --check src/terminal-ui.js && node --check src/provider-transport.js && node --check src/conversation-turns.js && node --check src/api-error.js && node --check src/providers.js && node --check src/provider-balance.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js && node --check src/docker_tools.js && node --check src/update-check.js",
     "ui": "node src/deepseek-watch.js -ui",
     "test:patch": "node scripts/self-test-patch.cjs",
     "test:skills": "node scripts/self-test-skills.mjs",
@@ -23,9 +24,14 @@
     "test:runtime": "node scripts/self-test-runtime.mjs",
     "test:fuzz": "node scripts/self-test-fuzz.mjs",
     "test:bounty": "node scripts/self-test-bounty.mjs",
-    "test:tui": "node scripts/self-test-tui.mjs",
+    "test:tui": "node scripts/self-test-tui.mjs && node --test scripts/self-test-terminal-ui.mjs",
+    "test:update": "node scripts/self-test-update.mjs",
+    "test:docker": "node scripts/self-test-docker.mjs",
+    "test:balance": "node scripts/self-test-balance.mjs",
     "test:history": "node scripts/self-test-history.mjs",
-    "test:compaction": "node scripts/self-test-compaction.mjs",
+    "test:native": "node --test scripts/self-test-native.mjs",
+    "test:providers": "node --test scripts/self-test-providers.mjs",
+    "test:compaction": "node scripts/self-test-compaction.mjs && node --test scripts/self-test-compaction-v2.mjs",
     "test:search": "node scripts/self-test-search.mjs",
     "test:sandbox": "node scripts/self-test-sandbox.mjs",
     "test:task-state": "node scripts/self-test-task-state.mjs",
@@ -34,7 +40,8 @@
     "test:coordination": "node scripts/self-test-coordination.mjs",
     "test:coordination:e2e": "node scripts/self-test-agent-wake.mjs",
     "smoke": "node src/deepseek-watch.js --help && node src/deepseek-detached.js --help && node src/wait-for-file.js --help",
-    "build:exe": "node build-exe.js"
+    "build:exe": "node build-exe.js",
+    "test:pricing": "node --test scripts/self-test-pricing.mjs"
   },
   "devDependencies": {
     "electron": "^42.5.0",

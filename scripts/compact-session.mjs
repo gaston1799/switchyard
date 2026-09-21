@@ -14,10 +14,8 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { contextLimitFor, normalizeProvider, providerConfig } from "../src/providers.js";
 import { compactSession } from "../src/context-compactor.js";
-
-const DEFAULT_MODEL = "deepseek-v4-flash";
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 function usage() {
   return `compact-session
@@ -28,25 +26,30 @@ Usage:
 Options:
   --out <file>            Output JSON file (default: <session>.compacted.json).
   --at <pct>              Compact threshold fraction (default: 0.9).
-  --limit <tokens>        Total context window (default: 1048576).
+  --limit <tokens>        Total context window (default: session provider/model).
   --completion <tokens>   Completion budget to reserve (default: 16384).
-  --keep-recent <n>       Messages kept verbatim (default: 40).
-  --method <llm|truncate> llm = DeepSeek summary (default), truncate = deterministic roll-up.
-  --model <name>          DeepSeek model for the summary (default: ${DEFAULT_MODEL}).
-  --base-url <url>        OpenAI-compatible base URL (default: ${DEFAULT_BASE_URL}).
+  --keep-recent <n>       Complete turns kept verbatim (default: 15).
+  --method <auto|llm|truncate> Provider summary with deterministic fallback (default: auto).
+  --provider <name>       Provider (default: saved session provider).
+  --compact-provider <name> Summary provider override.
+  --compact-model <name>  Summary model override.
+  --compact-base-url <url> Summary endpoint override.
+  --model <name>          Model (default: saved session model).
+  --base-url <url>        Endpoint (default: saved session endpoint).
   -h, --help              Show help.
 `;
 }
 
 function parseArgs(argv) {
   const opts = {
-    method: "llm",
+    method: "auto",
     at: 0.9,
-    limit: 1_048_576,
+    limit: null,
     completion: 16_384,
-    keepRecent: 40,
-    model: process.env.DEEPSEEK_MODEL || DEFAULT_MODEL,
-    baseUrl: process.env.DEEPSEEK_BASE_URL || DEFAULT_BASE_URL
+    keepRecent: 15,
+    model: null,
+    baseUrl: null,
+    provider: null
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -62,6 +65,11 @@ function parseArgs(argv) {
     else if (arg === "--completion") opts.completion = Number.parseInt(next(), 10);
     else if (arg === "--keep-recent") opts.keepRecent = Number.parseInt(next(), 10);
     else if (arg === "--method") opts.method = next();
+    else if (arg === "--provider") opts.provider = normalizeProvider(next());
+    else if (arg === "--compact-provider") opts.compactProvider = normalizeProvider(next());
+    else if (arg === "--compact-model") opts.compactModel = next();
+    else if (arg === "--compact-base-url") opts.compactBaseUrl = next();
+    else if (arg === "--tool-tokens") opts.toolTokens = Number(next());
     else if (arg === "--model") opts.model = next();
     else if (arg === "--base-url") opts.baseUrl = next();
     else if (arg.startsWith("-")) throw new Error(`Unknown argument: ${arg}`);
@@ -73,10 +81,10 @@ function parseArgs(argv) {
 function validate(opts) {
   if (opts.help) return;
   if (!opts.sessionFile) throw new Error("Provide a session JSON file as the first argument.");
-  if (!["llm", "truncate"].includes(opts.method)) throw new Error("--method must be llm or truncate.");
+  if (!["auto", "llm", "truncate"].includes(opts.method)) throw new Error("--method must be auto, llm or truncate.");
   if (!Number.isFinite(opts.at) || opts.at <= 0 || opts.at > 1) throw new Error("--at must be a fraction in (0, 1].");
-  if (!Number.isFinite(opts.limit) || opts.limit < 2000) throw new Error("--limit must be at least 2000 tokens.");
-  if (!Number.isInteger(opts.keepRecent) || opts.keepRecent < 2) throw new Error("--keep-recent must be an integer >= 2.");
+  if (opts.limit !== null && (!Number.isFinite(opts.limit) || opts.limit < 2000)) throw new Error("--limit must be at least 2000 tokens.");
+  if (!Number.isInteger(opts.keepRecent) || opts.keepRecent < 1) throw new Error("--keep-recent must be an integer >= 1.");
 }
 
 async function main() {
@@ -89,10 +97,18 @@ async function main() {
 
   const sessionFile = resolve(opts.sessionFile);
   const session = JSON.parse(await readFile(sessionFile, "utf8"));
+  opts.provider ||= session.config?.provider || session.provider || "deepseek";
+  opts.model ||= session.model || providerConfig(opts.provider).model;
+  opts.baseUrl ||= session.baseUrl || providerConfig(opts.provider).baseUrl;
+  opts.limit ||= contextLimitFor(opts.provider, opts.model);
+  opts.toolTokens ??= session.config?.compactToolTokens || 0;
+  for (const key of ["compactProvider", "compactModel", "compactBaseUrl"]) opts[key] ||= session.config?.[key];
   const outFile = resolve(opts.out || `${sessionFile}.compacted.json`);
 
   const meta = await compactSession(
     {
+      ...opts,
+      compactToolTokens: opts.toolTokens,
       model: opts.model,
       baseUrl: opts.baseUrl,
       compactMethod: opts.method,

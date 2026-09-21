@@ -11,7 +11,7 @@
  *   3. Copy node.exe → <name>.exe
  *   4. postject: inject the blob into the exe
  *
- * Output: dist/exe/  dsw.exe  d.exe  dsd.exe  dswait.exe
+ * Output: dist/exe/  switchyard.exe  dsw.exe  d.exe  dsd.exe  dswait.exe
  */
 
 import { execSync } from "node:child_process";
@@ -31,7 +31,7 @@ const NODE_EXE = process.execPath;
 const systemPrompt = readFileSync(resolve(ROOT, "prompts", "default-system.md"), "utf8");
 
 const ENTRIES = [
-  { name: "dsw",    src: "src/deepseek-watch.js" },
+  { name: "switchyard",    src: "src/deepseek-watch.js" },
   { name: "dsd",    src: "src/deepseek-detached.js" },
   { name: "dswait", src: "src/wait-for-file.js" },
 ];
@@ -87,8 +87,10 @@ for (const { name, src } of ENTRIES) {
   process.stdout.write(`  ✓ ${name}.exe\n`);
 }
 
-// d.exe is a copy of dsw.exe (alias)
-copyFileSync(resolve(DIST, "dsw.exe"), resolve(DIST, "d.exe"));
-process.stdout.write("\n  ✓ d.exe  (alias for dsw)\n");
+// Preserve existing standalone command aliases.
+for (const alias of ["dsw", "d"]) {
+  copyFileSync(resolve(DIST, "switchyard.exe"), resolve(DIST, `${alias}.exe`));
+  process.stdout.write(`\n  ✓ ${alias}.exe (alias for switchyard)\n`);
+}
 
 process.stdout.write(`\nOutput: ${DIST}\n`);

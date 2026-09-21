@@ -1,8 +1,10 @@
-# dsw — DeepSeek Watch
+# Switchyard — coding-agent harness
 
-> Interactive DeepSeek coding agent for the terminal. Streams thinking, calls tools, reads and edits files, runs shell commands — with session memory and permission controls.
+> A local coding-agent harness for DeepSeek, GLM, Claude, and GPT. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
 
-[![Node.js ≥ 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+`switchyard` is the main command. `d`, `dsw`, and `ds` remain interactive aliases; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.
+
+[![Node.js ≥ 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-lightgrey)]()
 
@@ -22,41 +24,80 @@
 - **Claude fallback** — `dsd` falls back to `claude -p` if DeepSeek is unavailable
 - **Dependency-light CLI** — core agent tools use built-in Node APIs; Electron is used only for `d -ui`
 - **OpenAI-compatible** — point at any compatible endpoint via `--base-url`
-- **GLM support** — use Z.AI's OpenAI-compatible GLM API with `--provider glm`
-- **Dynamic auto context compaction** — at the default 90% trigger, the wrapper follows the selected provider/model context window (GLM-4.7: 200K; older GLM-4.5/GLM-4-32B variants: 128K; DeepSeek v4: 1,048,576) and reserves the configured completion budget; use `--compact-limit <tokens>` for a custom endpoint/model
+- **Provider adapters** — DeepSeek/GLM chat completions, Claude Messages, and GPT Responses; use `--provider deepseek|glm|anthropic|openai`. `claude` and `gpt` are accepted aliases.
+- **Automatic prompt caching** — Claude automatic cache control, implicit caching on the other providers, and normalized input/cache-read/cache-write/output usage.
+- **Automatic context compaction** — provider/model budgets, a replaced prefix summary, 15 complete tool-safe turns, and bounded deterministic fallback.
+
+### Model picker pricing
+
+The startup and `/model` API pickers show USD per million input, cached-input,
+and output text tokens, with cache-write rates where applicable. Known prices sort
+by an example of 10,000 uncached input + 1,000 output tokens; this is a comparison,
+not a budget cap or prediction of total agent cost. Tool schemas, history, reasoning,
+and repeated requests add tokens. Tool fees, long-context premiums, and other billing
+modifiers can add cost. DeepSeek shows peak reference rates (off-peak is half).
+
+The bundled reference table was checked **2026-09-21**, and is not fetched live.
+Unverified IDs (including snapshots without a verified entry) show **Price unknown**.
+Custom endpoints show vendor reference prices only. Codex/Claude Code account
+connections show plan/usage-limit labels and preserve provider credit notices.
+Sources: [OpenAI](https://developers.openai.com/api/docs/pricing) and its individual
+model pages, [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
+[Z.AI](https://docs.z.ai/guides/overview/pricing), and
+[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/).
 
 ---
 
 ## Context compaction
 
-Long agent sessions grow the transcript until the API rejects the request at
-the model's context ceiling (for DeepSeek v4-class models: **1,048,576 tokens
-total = messages + completion**). `dsw` detects this *before* the request is
-sent and compacts:
+Before model requests, the harness estimates messages, provider state, tool definitions,
+and the reserved completion budget. At 90% of the available input budget it replaces
+the older prefix with one summary. Both in-memory context and the atomically saved
+session contain the replacement; folded raw messages are not retained in that file.
 
-- **Detection** — before every model call the wrapper estimates the messages
-  budget (`limit − max_tokens`, chars/4 × 1.2 safety factor) and triggers at
-  `--compact-at` (default `0.9`) of that budget.
-- **What survives** — the system prompt, one `<context_compaction>` summary
-  message, and the recent tail verbatim (default 40 messages, capped at ~10%
-  of the window) so `tool_call_id`s stay consistent.
-- **Methods** — `--compact-method auto` (default: DeepSeek LLM summary, falls
-  back to a deterministic roll-up of goal/plan/checkpoints if the API call
-  fails), `llm`, `truncate` (no API call, free), `detached` (spawn
-  `scripts/compact-session.mjs` in a subprocess), or `off`.
-- **Audit** — every compaction is appended to `session.compactions[]` with
-  `from_tokens`/`to_tokens`/method and printed as a ⚠ status line.
+- **Keep 15 complete turns:** a turn is one assistant response plus every matching
+  tool result, together with preceding user input. Parallel calls are kept together.
+  Any active, unfinished turn is also retained. This works during a single long task.
+- **Preserve recent content:** the retained tail and provider-specific reasoning
+  state stay verbatim. System instructions remain at the front. Repeated compaction
+  replaces the earlier summary instead of adding another summary to the prefix.
+- **Separate summary request:** the compactor uses its own prompt and output budget,
+  disables tools, and uses the selected provider's wire format. It defaults to the
+  session provider/model; overrides can select a separate summarizer.
+- **Bounded fallback:** `auto` and `llm` attempt at most two summary requests, each
+  with a 30-second timeout. Missing credentials, empty/oversized summaries, timeouts,
+  and exhausted retries fall back to a deterministic roll-up. `truncate` skips the API.
+- **Budget errors are explicit:** if the 15 retained turns plus the active turn cannot
+  fit, compaction stops without changing the session. Choose a larger supported
+  context window or explicitly lower `--compact-keep-recent`; no tool pair is split.
+- **Audit:** `session.compactions[]` records folded/retained turns and messages,
+  summary provider/model, method, and measured post-compaction estimates.
 
-CLI flags: `--compact-at <pct>` (default 0.9), `--compact-method <auto|llm|truncate|detached|off>`,
-`--compact-limit <tokens|auto>` (default `auto`), `--compact-keep-recent <n>` (default 40), `--no-compact`.
-Environment equivalents: `DEEPSEEK_COMPACT_AT`, `DEEPSEEK_COMPACT_METHOD`, `DEEPSEEK_CONTEXT_LIMIT`,
-`DEEPSEEK_COMPACT_KEEP_RECENT`.
-
-To compact an existing session file manually (or from another agent):
-
-```bash
-node scripts/compact-session.mjs .deepseek-watch/sessions/<file>.json --method truncate
+```powershell
+d --provider anthropic -p "Inspect this repository"
+d --provider openai --model gpt-5 -p "Inspect this repository"
+d --provider deepseek --compact-provider openai --compact-model gpt-5 -p "Work on the task"
 ```
+
+Options: `--compact-at <fraction>` (0.9), `--compact-keep-recent <turns>` (15),
+`--compact-limit <tokens|auto>`, `--compact-method <auto|llm|truncate|detached|off>`,
+`--compact-provider`, `--compact-model`, and `--compact-base-url`.
+`--no-compact` disables automatic compaction. `detached` uses the same provider-aware
+compactor in a child process. Recent-turn semantics apply to all methods.
+
+`DSW_COMPACT_KEEP_RECENT`, `DSW_COMPACT_PROVIDER`, `DSW_COMPACT_MODEL`, and
+`DSW_COMPACT_BASE_URL` configure these defaults. Existing `DEEPSEEK_COMPACT_*`
+and `DEEPSEEK_CONTEXT_LIMIT` settings still work. Existing keep-recent settings
+now count complete turns, rather than individual messages.
+
+To compact a saved session into a separate result file:
+
+```powershell
+node scripts/compact-session.mjs .deepseek-watch/sessions/<file>.json --method auto
+```
+
+The CLI inherits the session provider, model, and endpoint. See
+[provider support](docs/providers.md) for configuration, protocols, and limits.
 
 **Coordination-level compaction** — agents get two extra tools:
 - `compact_session` — an agent compacts *its own* session on demand (`force: true` even below the auto threshold).
@@ -69,7 +110,7 @@ node scripts/compact-session.mjs .deepseek-watch/sessions/<file>.json --method t
 ### Windows — one-liner
 
 ```powershell
-irm https://raw.githubusercontent.com/gaston1799/deepseek-detached-agent/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gaston1799/switchyard/master/install.ps1 | iex
 ```
 
 Or download [`install.bat`](install.bat) and double-click it.
@@ -79,8 +120,8 @@ The installer checks for **Git** and **Node.js ≥ 18**, installs any missing de
 ### Manual
 
 ```bash
-git clone https://github.com/gaston1799/deepseek-detached-agent
-cd deepseek-detached-agent
+git clone https://github.com/gaston1799/switchyard
+cd switchyard
 npm install -g .
 ```
 
@@ -90,29 +131,128 @@ npm install -g .
 
 ```bash
 # Save your API key once
-dsw config set-key sk-xxxxxxxxxxxxxxxx
+switchyard config set-key sk-xxxxxxxxxxxxxxxx
 
 # Ask a question
-dsw -p "explain this codebase"
+switchyard -p "explain this codebase"
 
 # Open the TUI dashboard (no args)
-dsw
+switchyard
 
 # Open the Electron desktop UI
 d -ui
 
 # Resume a previous session
-dsw --resume
+switchyard --resume
 ```
 
 ---
+
+## Startup and local commands
+
+Run `switchyard` with no arguments. The styled startup screens guide you through:
+
+1. **New run** (option 1), **Resume session** (option 2), or agent messages.
+2. **Connection**: ChatGPT/Codex login, Claude Code login, or a provider API key.
+3. **Model**: a live catalog from that connection, including model descriptions.
+4. **Permissions**, then the chat input. No separate initial `Prompt>` is needed.
+
+Use arrows and Enter, type a number, or type to filter. Page Up/Down navigates
+long lists; Escape goes back. Model catalogs reflect the provider/CLI response,
+not a guarantee of entitlement. If discovery fails, the picker labels the error
+and offers manual model entry instead of inventing an available-model list.
+Sign-in uses the existing `switchyard login codex|claude` commands; API keys use
+`switchyard config set-<provider>-key` (`set-key` for DeepSeek).
+
+Type `/` for command hints; Tab completes a command. These are handled locally:
+
+| Command | Action |
+| --- | --- |
+| `/commands`, `/help` | Show local commands |
+| `/model` | Open the model picker for this connection |
+| `/model <id>` | Select a model directly |
+| `/provider` | Switch an API session to another API provider and model |
+| `/usage` | Show token usage or native account limits when available |
+| `/session` | Show the session location and connection |
+| `/exit` | Save and quit |
+
+Commands entered during a response are queued and processed after the current
+turn/task. Unknown slash commands show help and are not sent to a model.
+
+**Sessions belong to conversations, not individual models.** API sessions retain
+messages and tool-call/result pairs when switching between DeepSeek, GLM, OpenAI,
+and Anthropic. Provider-specific reasoning state is discarded on a switch and
+the context budget is recalculated. Switching API provider sends the saved
+conversation to that provider. Resume offers a saved-model option, a new model,
+and (for API sessions) a new API provider.
+
+Codex sessions can change Codex models; Claude Code sessions can change Claude
+models. Their native conversation IDs and tool histories are engine-specific:
+crossing between native engines, or between native and API, requires a new
+session with an explicit context handoff. Automatic cross-engine handoff is not
+implemented yet; the original native session remains with its engine.
+
+## ChatGPT and Claude subscription connections
+
+Use your installed, signed-in Codex or Claude Code CLI as the execution backend:
+
+```powershell
+switchyard --backend codex --tui
+switchyard --backend claude --tui
+```
+
+The dashboard also offers these connections when starting a new run. If needed:
+
+```powershell
+switchyard login codex
+switchyard login claude
+switchyard auth codex
+switchyard auth claude
+```
+
+These commands delegate login to the official CLI. Switchyard does not copy its
+credentials. Subscription backends remove inherited API-key/proxy variables from
+the child environment and check the native account login before starting work.
+API-key billing remains available through `--backend api --provider openai` or
+`--backend api --provider anthropic`; there is no automatic billing fallback.
+
+- The native engine owns tools, instruction discovery, context compaction, and
+  provider caching. Switchyard's API tools, agent coordination, custom scope,
+  and compactor flags do not configure those engines.
+- `--permission ask` routes native approval requests into the TUI. Codex starts
+  in its read-only sandbox with untrusted-command approvals; Claude uses Manual
+  mode and its existing rules. `review` uses Codex's read-only sandbox with no
+  approvals, or Claude's Read/Glob/Grep tools with no MCP tools. `full` explicitly
+  selects native unrestricted execution, subject to managed CLI policies.
+- The TUI streams replies and tool activity. Escape interrupts generation.
+  Enter queues a follow-up. Native sessions open straight into the input box.
+- `/model` opens the connection model picker; `/model <name>` changes it for later turns.
+  Without `--model`, each CLI chooses its configured default.
+- Codex allowance and reset times appear in the status row; `/usage` refreshes
+  them. Claude reports rate-limit events but this integration does not fetch a
+  remaining subscription quota or dollar balance.
+- Switchyard saves a transcript plus the native conversation ID. `switchyard
+  --resume` restores the matching backend; keep the native CLI's session files.
+  API sessions and native sessions cannot be converted by switching backends.
+  Resume from the original workspace. `--no-save-session` disables Switchyard's
+  copy, not the native CLI's own history.
+- `--timeout` also bounds each native turn. Interrupted/failed turns are saved;
+  model requests are not automatically retried, to avoid repeating tool actions.
+
+Requires an installed Codex app-server CLI or Claude Code with bidirectional
+stream-json support. Verified here with Codex 0.150.1 and Claude Code 2.1.278.
+For nonstandard installations, set `SWITCHYARD_CODEX_CLI` or
+`SWITCHYARD_CLAUDE_CLI` to an executable or JavaScript entrypoint (not a shell shim).
+`SWITCHYARD_BACKEND=codex|claude|api` sets the default for command-line runs;
+a saved session retains its own backend.
 
 ## Commands
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `dsw` | `d` | Interactive agent — streams thinking, calls tools, saves sessions |
-| `dsw -ui` | `d -ui` | Electron desktop UI with HTTP control API and CDP debugging port |
+| `switchyard` | `d`, `dsw`, `ds` | Interactive agent — streams thinking, calls tools, saves sessions |
+| `switchyard -ui` | `d -ui` | Electron desktop UI with HTTP control API and CDP debugging port |
+| `switchyard balance` | — | Read DeepSeek credit; `--minimum <usd>` exits 2 below the reserve floor |
 | `dsd` | — | Fire-and-forget: prompt → Markdown file, optional Claude fallback |
 | `dswait` | — | Poll until a detached output file appears |
 
@@ -127,8 +267,8 @@ dsw --resume
 | `full` | All tools run automatically without prompting |
 
 ```bash
-dsw --permission review -p "audit the auth module"
-dsw --permission full   -p "refactor utils.js to use ES modules"
+switchyard --permission review -p "audit the auth module"
+switchyard --permission full   -p "refactor utils.js to use ES modules"
 ```
 
 ### Unattended, scoped work
@@ -136,7 +276,7 @@ dsw --permission full   -p "refactor utils.js to use ES modules"
 For an authorized task that may run unattended, seed the task scope at launch and use full permission:
 
 ```powershell
-dsw --provider glm --permission full --allow-target example.com,api.example.com --agent-id recon
+switchyard --provider glm --permission full --allow-target example.com,api.example.com --agent-id recon
 ```
 
 Repeat `--allow-target` for additional authorized assets, or comma-separate them. While a session is running, the agent can use `scope_add_assets` or `scope_remove_assets`; no replacement agent is needed. For a complete policy, use `--scope-file scope.json`; it accepts the same `allowed_assets`, `excluded_assets`, `allowed_classes`, `excluded_classes`, and `restrictions` fields as `scope_set`.
@@ -291,6 +431,26 @@ Two properties worth knowing:
 
 ### Terminal UI
 
+Interactive chats now use a full-screen view with one renderer, a pinned input
+and status row, live tool cards, and terminal resize handling. Start it with
+`d --tui -p "your task"` or from the interactive dashboard. Type during a response
+to queue a follow-up; it runs after the current task returns.
+
+- Enter sends; Alt+Enter inserts a newline. Bracketed paste stays in the draft.
+- Escape interrupts generation; during tools it stops after the current batch.
+- Page Up / Page Down scroll history; Ctrl+End follows the latest output.
+- Ctrl+R toggles reasoning; Ctrl+E toggles tool arguments and results.
+- Ctrl+L forces a redraw. `/exit` quits; Ctrl+C quits when idle.
+- Permission questions get their own input and preserve your draft.
+
+The screen restores the previous terminal view on exit. Saved sessions retain
+the conversation. `--tui-quiet`, redirected output, and `TERM=dumb` keep the
+plain-output path. One-shot commands keep their existing rendering unless
+`--tui` is supplied. The full-screen view uses colored message labels, compact tool rows, word-wrapped
+answers, and a bordered composer. Token/cache statistics stay in the status bar.
+Headings, bold text, inline code, and fenced code receive basic terminal styling.
+`--no-color` or `NO_COLOR` disables colors while preserving the layout.
+
 Interactive sessions render with a Claude Code-style terminal UI (pure ANSI, no
 dependencies):
 
@@ -302,7 +462,7 @@ dependencies):
   as the line streams; unbreakable over-long tokens (URLs, code) hard-split
 - a live **spinner status line** (model · phase · token count · elapsed time)
   that stays animated during thinking/tool phases and clears before output;
-  interactive sessions also set the terminal window title (`dsw · <folder>`)
+  interactive sessions also set the terminal window title (`Switchyard · <folder>`)
 - compact **tool-call trace**: each call prints `▹ name {args}` when it starts
   and `✓ name (duration)` / `✗ failed` when it finishes, before the result
 
@@ -312,7 +472,7 @@ set. For clean terminal copies, use `--tui-quiet` (or
 rewriting, so streamed text never duplicates or leaves status artifacts when
 selected/copied mid-run. `npm run test:tui` runs the renderer self-tests.
 
-### Security tooling (allowlisted targets only)Web-app security tools for testing **your own properties** (`dsw security allow
+### Security tooling (allowlisted targets only)Web-app security tools for testing **your own properties** (`switchyard security allow
 <domain>` registers a target; anything else is refused):
 
 - `sec_http_request` — raw HTTP(S) requests (method/headers/body/redirect control)
@@ -325,7 +485,7 @@ selected/copied mid-run. `npm run test:tui` runs the renderer self-tests.
 
 Safety model: active tools require the target host in
 `~/.deepseek-watch/security-allowlist.json` (managed via
-`dsw security allow <domain>` / `remove` / `list`). Requests are rate-limited,
+`switchyard security allow <domain>` / `remove` / `list`). Requests are rate-limited,
 and the tools are request primitives and passive analyzers — no
 auto-exploitation or weaponization. `npm run test:security` runs the offline
 self-tests.
@@ -345,8 +505,9 @@ self-tests.
   --skills <a,b>                   Comma-separated skills to load
   --skill-root <dir>               Directory containing skill folders; repeatable
   --list-skills                    List discovered local skills and exit
-  --model <name>                   Model (default: deepseek-v4-flash)
-  --base-url <url>                 OpenAI-compatible base URL (default: https://api.deepseek.com)
+  --provider <name>                deepseek, glm, anthropic, openai (default: deepseek)
+  --model <name>                   Model (selected provider default)
+  --base-url <url>                 Provider API base URL
   --effort <high|max>              Reasoning effort (default: high)
   --thinking <enabled|disabled>    Thinking toggle (default: enabled)
   --max-tokens <n>                 Max output tokens (default: 16384)
@@ -384,7 +545,7 @@ Doctor reports DeepSeek key status, OpenAI vision status, selected vision model,
 `dsw` can load Codex-style local skills by appending their `SKILL.md` files to the system prompt:
 
 ```powershell
-dsw -p "use PBC to inspect the page" --skill pbc --permission full
+switchyard -p "use PBC to inspect the page" --skill pbc --permission full
 ```
 
 Skill discovery checks, in order:
@@ -399,7 +560,7 @@ Use `--list-skills` to see discovered skills. During a session, DeepSeek can als
 When you resume with a skill, the wrapper refreshes the saved system message and persists the skill list in the session JSON:
 
 ```powershell
-dsw --resume --skill pbc -p "continue"
+switchyard --resume --skill pbc -p "continue"
 ```
 
 Future resumes of that session reuse the saved skills automatically unless you pass a different `--skill` / `--skills` set.
@@ -430,7 +591,7 @@ $env:OPENAI_VISION_MODEL = "gpt-4.1-mini"
 Quiet outfile mode is meant for detached subagent workflows where console text costs tokens:
 
 ```bash
-dsw -p "inspect this repo and write findings" --permission full --no-output --outfile result.md
+switchyard -p "inspect this repo and write findings" --permission full --no-output --outfile result.md
 ```
 
 By default the Markdown file contains only the final assistant response and files touched by edit tools. Add `--full-chat` when you want the whole conversation, tool calls, tool results, and reasoning transcript written to the outfile.
@@ -464,12 +625,35 @@ dswait out.md --timeout 120000   # wait up to 2 min
 ## Configuration
 
 ```bash
-dsw config set-key <key>   # save to %APPDATA%\deepseek-detached-agent\config.json
-dsw config set-glm-key <key> # save a Z.AI GLM key in the same config file
-dsw config set-google-search-key <key>
-dsw config set-google-search-engine-id <engine-id>
-dsw config path            # show config file location
+switchyard config set-key <key>   # save to %APPDATA%\deepseek-detached-agent\config.json
+switchyard config set-glm-key <key> # save a Z.AI GLM key in the same config file
+switchyard config set-anthropic-key <key> # Claude API key
+switchyard config set-openai-key <key> # GPT and OpenAI image tools
+switchyard config set-google-search-key <key>
+switchyard config set-google-search-engine-id <engine-id>
+switchyard config path            # show config file location
 ```
+
+DeepSeek publishes a read-only balance endpoint but no supported payment or
+automatic top-up API. Use a one-shot guard in scripts or Task Scheduler:
+
+```powershell
+switchyard balance --minimum 10
+switchyard balance --minimum 10 --json
+```
+
+For long-running agents, an explicitly configured provider can take over when
+DeepSeek returns HTTP 402:
+
+```powershell
+$env:DSW_BALANCE_FALLBACK_PROVIDER = "glm"
+switchyard --resume --agent-id my-worker
+```
+
+The fallback is opt-in, requires its own API key, and uses that provider's normal
+API billing. It does not automate a payment page or charge a card. The Z.AI
+Coding Plan endpoint has separate eligibility and usage restrictions; this
+harness continues to use the general GLM API endpoint.
 
 Environment variables (take priority over saved config):
 
@@ -478,6 +662,10 @@ DEEPSEEK_API_KEY=sk-...
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 GLM_API_KEY=your-z-ai-key
+ANTHROPIC_API_KEY=your-anthropic-key
+OPENAI_API_KEY=your-openai-key
+DSW_PROVIDER=deepseek
+DSW_BALANCE_FALLBACK_PROVIDER=glm
 GOOGLE_SEARCH_API_KEY=...
 GOOGLE_SEARCH_ENGINE_ID=...
 WEB_SEARCH_PROVIDER=auto
@@ -497,9 +685,9 @@ If Google returns an access error such as `This project does not have the access
 Sessions are saved to `.deepseek-watch/sessions/` in the working directory.
 
 ```bash
-dsw --resume                        # arrow-key picker, sorted by last used
-dsw --session path/to/session.json  # explicit file
-dsw --no-save-session               # ephemeral — nothing written
+switchyard --resume                        # arrow-key picker, sorted by last used
+switchyard --session path/to/session.json  # explicit file
+switchyard --no-save-session               # ephemeral — nothing written
 ```
 
 ---
@@ -508,9 +696,9 @@ dsw --no-save-session               # ephemeral — nothing written
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `HTTP 401: Authentication Fails` | Invalid API key | `dsw config set-key sk-...` |
+| `HTTP 401: Authentication Fails` | Invalid API key | `switchyard config set-key sk-...` |
 | `HTTP 402: Insufficient Balance` | Account needs credit | Top up on DeepSeek Platform |
-| `No DeepSeek API key found` | No key set | Set `DEEPSEEK_API_KEY` or run `dsw config set-key` |
+| `No DeepSeek API key found` | No key set | Set `DEEPSEEK_API_KEY` or run `switchyard config set-key` |
 
 ---
 

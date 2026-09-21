@@ -36,11 +36,11 @@ function jsonError(status, message) {
 function startMockServer({ failStatuses = [500, 500], authFail = false } = {}) {
   let requests = 0;
   const server = createServer((req, res) => {
-    requests += 1;
     if (req.url !== "/chat/completions") {
       res.writeHead(404).end();
       return;
     }
+    requests += 1;
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {

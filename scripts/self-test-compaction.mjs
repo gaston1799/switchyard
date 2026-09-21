@@ -16,8 +16,8 @@ import {
 } from "../src/context-compactor.js";
 
 let passed = 0;
-function check(name, fn) {
-  fn();
+async function check(name, fn) {
+  await fn();
   passed += 1;
   console.log(`  PASS ${name}`);
 }
@@ -36,18 +36,18 @@ function bigMessages(count, content = "x".repeat(8000)) {
   return messages;
 }
 
-check("estimators are sane", () => {
+await check("estimators are sane", () => {
   assert.ok(estimateContextTokens([]) === 0);
   assert.ok(estimateContextTokens([{ role: "user", content: "abcd" }]) >= 4);
 });
 
-check("no compaction below threshold", () => {
+await check("no compaction below threshold", () => {
   const messages = [{ role: "system", content: "s" }, { role: "user", content: "hi" }];
   const plan = computeCompactionPlan(messages, { limit: LIMIT, threshold: 0.9, completionTokens: COMPLETION });
   assert.equal(plan.needed, false);
 });
 
-check("budget math: messages budget reserves completion (your 400 repro)", () => {
+await check("budget math: messages budget reserves completion (your 400 repro)", () => {
   // Reproduce the observed failure: request was 1,032,492 messages + 16,384
   // completion = 1,048,876 > 1,048,576. A plan must consider that OVER and
   // trigger. Estimate is chars/4 so craft chars/4 tokens to cross the budget.
@@ -57,6 +57,7 @@ check("budget math: messages budget reserves completion (your 400 repro)", () =>
   let chars = messages[0].content.length;
   for (let i = 0; chars < targetChars; i += 1) {
     messages.push({ role: "user", content: "u".repeat(perMessage) });
+    messages.push({ role: "assistant", content: "done" });
     chars += perMessage;
   }
   const rawUsage = estimateContextTokens(messages);
@@ -67,7 +68,7 @@ check("budget math: messages budget reserves completion (your 400 repro)", () =>
   assert.ok(plan.projectedTokens < MESSAGES_BUDGET * 0.9, "projected fits with headroom");
 });
 
-check("plan keeps recent tail and never starts on an orphaned tool message", () => {
+await check("plan keeps recent tail and never starts on an orphaned tool message", () => {
   const messages = bigMessages(500); // 1501 messages ≈ 1M raw chars/4 tokens — crosses the 90% trigger
   const plan = computeCompactionPlan(messages, { limit: LIMIT, threshold: 0.9, completionTokens: COMPLETION, keepRecent: 10 });
   assert.equal(plan.needed, true);
@@ -79,7 +80,7 @@ check("plan keeps recent tail and never starts on an orphaned tool message", () 
   assert.ok(plan.tailTokens < plan.prefixTokens, "tail is much smaller than folded prefix");
 });
 
-check("applyCompaction: system first, summary second, tail intact", () => {
+await check("applyCompaction: system first, summary second, tail intact", () => {
   const messages = bigMessages(500);
   const plan = computeCompactionPlan(messages, { limit: LIMIT, threshold: 0.9, completionTokens: COMPLETION });
   assert.equal(plan.needed, true);
@@ -96,7 +97,7 @@ check("applyCompaction: system first, summary second, tail intact", () => {
   for (const id of toolIds) assert.ok(keptCallIds.has(id), `tool result ${id} has its assistant call in tail`);
 });
 
-check("deterministic summary rolls up goal/plan/checkpoints", () => {
+await check("deterministic summary rolls up goal/plan/checkpoints", () => {
   const summary = buildDeterministicSummary(
     { goal: { objective: "Fix the server", status: "active" }, plan: [{ step: "a", status: "completed" }, { step: "b", status: "pending" }], checkpoints: [{ createdAt: "2026-01-01", summary: "did a thing" }] },
     [{ role: "assistant", content: "last note" }]
@@ -106,14 +107,14 @@ check("deterministic summary rolls up goal/plan/checkpoints", () => {
   assert.ok(summary.includes("did a thing"), "checkpoint present");
 });
 
-check("truncateTranscriptForSummary bounds the input", () => {
+await check("truncateTranscriptForSummary bounds the input", () => {
   const messages = bigMessages(80);
   const transcript = truncateTranscriptForSummary(messages, 4000);
   assert.ok(transcript.length <= 4000 * 4 + 2000, "input bounded to the token budget");
   assert.ok(transcript.includes("[tool_calls:"), "tool calls annotated");
 });
 
-check("compactSession truncate: end-to-end shrink + audit trail", async () => {
+await check("compactSession truncate: end-to-end shrink + audit trail", async () => {
   const messages = bigMessages(500);
   const session = { messages, goal: { objective: "o", status: "active" }, plan: [], checkpoints: [] };
   const meta = await compactSession({ compactMethod: "truncate", contextLimit: LIMIT, compactAt: 0.9, compactKeepRecent: 10, maxTokens: COMPLETION }, session);
@@ -125,7 +126,7 @@ check("compactSession truncate: end-to-end shrink + audit trail", async () => {
   assert.equal(session.compactions[0].foldedMessages > 0, true);
 });
 
-check("compactSession off: no-op", async () => {
+await check("compactSession off: no-op", async () => {
   const messages = bigMessages(60);
   const session = { messages };
   let started = 0;
@@ -135,7 +136,7 @@ check("compactSession off: no-op", async () => {
   assert.equal(session.messages.length, messages.length);
 });
 
-check("compactSession onStart fires exactly when compaction happens", async () => {
+await check("compactSession onStart fires exactly when compaction happens", async () => {
   const started = [];
   const small = { messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] };
   const smallMeta = await compactSession({ compactMethod: "truncate", contextLimit: LIMIT, compactAt: 0.9, compactKeepRecent: 10 }, small, { onStart: (plan, method) => started.push({ plan, method }) });
@@ -151,7 +152,7 @@ check("compactSession onStart fires exactly when compaction happens", async () =
   assert.ok(started[0].plan.usage > started[0].plan.target, "onStart carries the trigger numbers");
 });
 
-check("compactSession force compacts below threshold (coordination hook)", async () => {
+await check("compactSession force compacts below threshold (coordination hook)", async () => {
   // A moderately large session that would NOT trigger at 0.9 of 1M — but a
   // coordinator-initiated compact request forces the fold anyway.
   const messages = bigMessages(12); // ~24k raw tokens — far below threshold
@@ -164,13 +165,13 @@ check("compactSession force compacts below threshold (coordination hook)", async
   assert.ok(session.messages[0].role === "system" && session.messages[1].content.includes("<context_compaction"), "summary injected after system");
 });
 
-check("compactSession force on tiny session: nothing to fold", async () => {
+await check("compactSession force on tiny session: nothing to fold", async () => {
   const session = { messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] };
   const meta = await compactSession({ compactMethod: "truncate", contextLimit: LIMIT, compactAt: 0.9, compactKeepRecent: 40, compactForce: true }, session);
   assert.equal(meta, null, "nothing to fold -> no compaction");
 });
 
-check("compact-session.mjs CLI (truncate) writes a compacted result file", async () => {
+await check("compact-session.mjs CLI (truncate) writes a compacted result file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "dsw-compact-test-"));
   const sessionFile = join(dir, "session.json");
   const outFile = join(dir, "out.json");

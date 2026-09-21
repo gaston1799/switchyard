@@ -2,7 +2,7 @@
 
 ## Project
 
-This repository is `deepseek-detached-agent`, a Node.js CLI wrapper that runs DeepSeek as a local coding agent with workspace tools, session memory, detached execution, and optional Claude fallback.
+This repository contains Switchyard, a Node.js coding-agent harness for DeepSeek, GLM, Claude, and GPT with workspace tools, session memory, detached execution, and native Codex/Claude Code connections. The legacy npm identifier and data paths remain compatible.
 
 ## Working Rules
 

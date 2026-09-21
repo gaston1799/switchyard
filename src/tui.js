@@ -117,6 +117,42 @@ export function createMarkdownWriter(opts, linkify = (t) => t, { dimBody = false
       if (i < rows.length - 1 || endWithNewline) process.stdout.write("\n");
     }
   };
+  // Bottom-region ownership. At any moment the bottom of the screen holds
+  // EITHER the live partial line ("partial"), a pinned status line ("status"),
+  // or nothing ("none"). Both are tracked in shownRows so clearShown() always
+  // erases exactly what is there — the status can no longer be orphaned into
+  // the scrollback the way an independently timer-drawn status line was. That
+  // orphaning is why stale status lines piled up in every terminal except
+  // VS Code's (whose cursor/columns handling happened to mask it).
+  let bottomKind = "none";
+
+  // Fit an already-styled status string onto a single physical row so the
+  // one-row clearShown() math is always correct (no soft-wrap remainder).
+  const fitStatusRow = (styled) => {
+    const rows = wrapStyled(styled);
+    if (rows.length <= 1) return rows[0] ?? "";
+    const first = [...rows[0]];
+    return `${first.slice(0, Math.max(first.length - 1, 0)).join("")}…`;
+  };
+
+  // Draw (or refresh) the pinned status as the single bottom row. Never covers
+  // a live partial line; when the status has nothing to show, the bottom is
+  // cleared instead.
+  const parkStatus = () => {
+    if (!live || !status || typeof status.line !== "function") return;
+    if (bottomKind === "partial") return;
+    const styled = status.line();
+    if (styled == null) {
+      if (bottomKind === "status") { clearShown(); shownRows = []; bottomKind = "none"; }
+      return;
+    }
+    const row = fitStatusRow(styled);
+    clearShown();
+    renderRows([row], false);
+    shownRows = [row];
+    bottomKind = "status";
+  };
+
   const finalizeLine = (line) => {
     const styled = linkify(writeLine(line));
     const rows = wrapStyled(styled);
@@ -130,19 +166,23 @@ export function createMarkdownWriter(opts, linkify = (t) => t, { dimBody = false
       clearShown();
       renderRows(rows, true);
     }
-    status?.setBlocked?.(false);
-    status?.refresh?.();
+    shownRows = [];
+    bottomKind = "none";
   };
   const renderLive = () => {
-    if (pending === "") return;
+    if (pending === "") { parkStatus(); return; }
     const styled = linkify(writeLine(pending));
     const rows = wrapStyled(styled);
     if (rows.join("\u0000") === shownRows.join("\u0000")) return;
     clearShown();
     renderRows(rows, false);
     shownRows = rows;
-    status?.setBlocked?.(true);
+    bottomKind = "partial";
   };
+  // The active writer owns the pinned status: attaching routes the status's
+  // animation ticks through parkStatus so there is exactly one writer to stdout.
+  const clearRegion = () => { clearShown(); shownRows = []; bottomKind = "none"; };
+  const attachStatus = () => { if (live) status?.attach?.({ redraw: parkStatus, clearRegion }); };
   return {
     write(text) {
       if (!opts || opts.noOutput) return;
@@ -155,6 +195,7 @@ export function createMarkdownWriter(opts, linkify = (t) => t, { dimBody = false
         }
         return;
       }
+      attachStatus();
       for (const part of parts) finalizeLine(part);
       renderLive();
     },
@@ -169,8 +210,14 @@ export function createMarkdownWriter(opts, linkify = (t) => t, { dimBody = false
         process.stdout.write(dim(opts, "```") + "\n");
         inFence = false;
       }
-      status?.setBlocked?.(false);
-      status?.refresh?.();
+      if (live) {
+        // Leave the bottom clean so whatever the caller prints next starts on
+        // its own line, and release the status back to standalone drawing.
+        clearShown();
+        shownRows = [];
+        bottomKind = "none";
+        status?.detach?.();
+      }
     }
   };
 }
@@ -312,6 +359,7 @@ export class ToolCallTracker {
   }
 
   addCall(call) {
+    if (this.opts.ui) return this.opts.ui.addTool(call);
     const name = String(call?.function?.name || "tool");
     let summary = "";
     try {
@@ -329,6 +377,7 @@ export class ToolCallTracker {
   }
 
   complete(id, durationMs, error) {
+    if (this.opts.ui) return;
     if (this.opts.noOutput) return;
     const name = this.byId.get(id) || `tool#${id}`;
     const icon = error ? "✗" : "✓";

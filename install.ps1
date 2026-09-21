@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-  Installs deepseek-detached-agent (commands: dsw, d, dsd, dswait) globally.
+  Installs Switchyard (commands: switchyard, d, dsw, dsd, dswait) globally.
 
 .DESCRIPTION
-  Checks for Git and Node.js >= 18, installs missing deps via winget,
+  Checks for Git and Node.js >= 20, installs missing deps via winget,
   refreshes PATH, then clones the repo (or reuses the current directory)
   and runs npm install -g.
 
 .PARAMETER RepoUrl
-  Git clone URL. Defaults to the placeholder below — update before distributing.
+  Git clone URL. Defaults to the Switchyard source repository.
 
 .PARAMETER Branch
-  Branch to clone. Default: main.
+  Branch to clone. Default: master.
 
 .PARAMETER InstallDir
   Where to clone if not running from inside the repo.
@@ -19,15 +19,15 @@
 
 .EXAMPLE
   # Run from outside the repo (downloads and installs):
-  irm https://raw.githubusercontent.com/OWNER/REPO/main/install.ps1 | iex
+  irm https://raw.githubusercontent.com/gaston1799/switchyard/master/install.ps1 | iex
 
   # Run from inside the repo (installs current working tree):
   .\install.ps1
 #>
 [CmdletBinding()]
 param(
-  [string]$RepoUrl    = "https://github.com/gaston1799/deepseek-detached-agent",
-  [string]$Branch     = "main",
+  [string]$RepoUrl    = "https://github.com/gaston1799/switchyard",
+  [string]$Branch     = "master",
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "deepseek-detached-agent")
 )
 
@@ -38,7 +38,7 @@ $ErrorActionPreference = "Stop"
 
 function Write-Banner {
   Write-Host ""
-  Write-Host "  deepseek-detached-agent installer" -ForegroundColor Cyan
+  Write-Host "  Switchyard installer" -ForegroundColor Cyan
   Write-Host "  $(('─' * 36))" -ForegroundColor DarkGray
   Write-Host ""
 }
@@ -176,7 +176,7 @@ $ExeDir = Join-Path $env:LOCALAPPDATA "Programs\dsw"
 Write-Step "Copying executables to $ExeDir..."
 New-Item -ItemType Directory -Force -Path $ExeDir | Out-Null
 
-$aliases = @("dsw", "d", "dsd", "dswait")
+$aliases = @("switchyard", "dsw", "d", "dsd", "dswait")
 foreach ($alias in $aliases) {
   $src  = Join-Path $repoDir "dist\exe\$alias.exe"
   $dest = Join-Path $ExeDir  "$alias.exe"
@@ -204,13 +204,13 @@ if ($userPath -notlike "*$ExeDir*") {
 # ── verify ────────────────────────────────────────────────────────────────────
 
 Write-Host ""
-if (Test-Command "dsw") {
-  Write-Ok "dsw.exe is on PATH and working."
-  Write-Ok "Also available: d  dsd  dswait"
+if (Test-Command "switchyard") {
+  Write-Ok "switchyard.exe is on PATH and working."
+  Write-Ok "Also available: d  dsw  dsd  dswait"
 } else {
-  Write-Warn "dsw not found yet — open a new terminal window and try: dsw --help"
+  Write-Warn "switchyard not found yet — open a new terminal window and try: switchyard --help"
 }
 
 Write-Host ""
-Write-Host "  Set your API key:  dsw config set-key <your-deepseek-key>" -ForegroundColor DarkGray
+Write-Host "  Set your API key:  switchyard config set-key <your-deepseek-key>" -ForegroundColor DarkGray
 Write-Host ""

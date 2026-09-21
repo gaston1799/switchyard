@@ -9,8 +9,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { deepSeekHttpError } from "./api-error.js";
 import { isRetryableFetchError, retryBackoffMs } from "./fetch-retry.js";
 import { configPath, getDeepSeekApiKey, getProviderApiKey, setProviderApiKey } from "./config.js";
-import { contextLimitFor, normalizeProvider, providerConfig } from "./providers.js";
-import { applyThinkingOptions } from "./deepseek-request.js";
+import { contextLimitFor, fetchProviderModels, hasKnownContextLimit, normalizeProvider, PROVIDERS, providerConfig } from "./providers.js";
+import { providerStream } from "./provider-transport.js";
+import { DEEPSEEK_TOP_UP_URL, getProviderBalance, isBelowMinimum } from "./provider-balance.js";
 import { listSessions, newSession, newSessionPath, readSession, sessionPath, touchSession, writeSession } from "./session-memory.js";
 import { certLogs, classifyUrl, dnsLookup, fileAnalyze, trackSafetyState, verifyDownload, virusTotalLookup, watchDownloads, whoisLookup } from "./download-safety.js";
 import { runSecurityTool, securityToolSchemas } from "./security_tools.js";
@@ -19,7 +20,14 @@ import { runReTool, reToolSchemas } from "./re_tools.js";
 import { runRuntimeTool, runtimeToolSchemas } from "./runtime_tools.js";
 import { runFuzzTool, fuzzToolSchemas } from "./fuzz_tools.js";
 import { runBountyTool, bountyToolSchemas } from "./bounty_tools.js";
+import { runDockerTool, dockerToolSchemas } from "./docker_tools.js";
+import { checkForUpdates, clearSkipped, isSkipped, performUpdate, setSkipped } from "./update-check.js";
 import { createMarkdownWriter, formatDuration, ToolCallTracker } from "./tui.js";
+import { TerminalUI } from "./terminal-ui.js";
+import { runNativeChat } from "./native-chat.js";
+import { nativeAuth } from "./native-process.js";
+import { CONNECTIONS, chooseModel, applyApiModel, SLASH_HELP, parseSlash } from "./connection-picker.js";
+let activeTerminalUi = null;
 import { renderChatHistory, historyTitle } from "./history.js";
 import { compactSession, compactSessionDetached, estimateContextTokens, estimateMessageTokens, estimateTokens } from "./context-compactor.js";
 import {
@@ -55,36 +63,42 @@ const EMBEDDED_UI_APP_DIR = typeof __UI_APP_DIR__ !== "undefined" ? __UI_APP_DIR
 const UI_APP_DIR = EMBEDDED_UI_APP_DIR || dirname(fileURLToPath(new URL("./ui/main.cjs", import.meta.url)));
 
 function usage() {
-  return `dsw  (alias: d)
+  return `switchyard  (aliases: d, dsw, ds)
 
 Usage:
-  dsw
-  dsw -ui [options]
-  dsw doctor
-  dsw agents [--all] [--json] [-i|--interactive] [--coord-dir <dir>]
-  dsw message <agent-id> <message> [--from <agent-id>] [--coord-dir <dir>]
-  dsw wake <agent-id> [message] [--from <agent-id>] [--coord-dir <dir>]
-  dsw inbox <agent-id> [--coord-dir <dir>]
-  dsw tasks [--coord-dir <dir>]
-  dsw security allow <domain>
-  dsw security remove <domain>
-  dsw security list
-  dsw skill list [--json]
-  dsw skill read <name>
-  dsw skill install <name|repo|path> [--force]
-  dsw skill create <name> [--description <text>]
-  dsw skill remove <name>
-  dsw skill sync [--from-workspace|--to-workspace] [--force] [--migrate-from-codex]
-  dsw skill doctor
-  dsw config set-key <key>
-  dsw config set-glm-key <key>
-  dsw config set-openai-key <key>
-  dsw config set-google-search-key <key>
-  dsw config set-google-search-engine-id <engine-id>
-  dsw config path
-  dsw -p <prompt> [options]
-  dsw --prompt-file <file> [options]
-  dsw --stdin [options]
+  switchyard
+  switchyard -ui [options]
+  switchyard doctor
+  switchyard login <codex|claude>
+  switchyard auth <codex|claude>
+  switchyard --backend codex --tui
+  switchyard --backend claude --tui
+  switchyard balance [--minimum <usd>] [--json]
+  switchyard agents [--all] [--json] [-i|--interactive] [--coord-dir <dir>]
+  switchyard message <agent-id> <message> [--from <agent-id>] [--coord-dir <dir>]
+  switchyard wake <agent-id> [message] [--from <agent-id>] [--coord-dir <dir>]
+  switchyard inbox <agent-id> [--coord-dir <dir>]
+  switchyard tasks [--coord-dir <dir>]
+  switchyard security allow <domain>
+  switchyard security remove <domain>
+  switchyard security list
+  switchyard skill list [--json]
+  switchyard skill read <name>
+  switchyard skill install <name|repo|path> [--force]
+  switchyard skill create <name> [--description <text>]
+  switchyard skill remove <name>
+  switchyard skill sync [--from-workspace|--to-workspace] [--force] [--migrate-from-codex]
+  switchyard skill doctor
+  switchyard config set-key <key>
+  switchyard config set-glm-key <key>
+  switchyard config set-anthropic-key <key>
+  switchyard config set-openai-key <key>
+  switchyard config set-google-search-key <key>
+  switchyard config set-google-search-engine-id <engine-id>
+  switchyard config path
+  switchyard -p <prompt> [options]
+  switchyard --prompt-file <file> [options]
+  switchyard --stdin [options]
 
 Options:
   -ui, --ui                   Launch the Electron desktop UI instead of the CLI/TUI.
@@ -100,13 +114,15 @@ Options:
   --skills <a,b>               Comma-separated skills to load.
   --skill-root <dir>           Directory containing skill folders. Repeatable.
   --list-skills                List discovered local skills and exit.
-  --skill-root also selects the canonical DeepSeek root for dsw skill install/create/remove/sync.
-  --provider <deepseek|glm>    Model provider. Default: deepseek
-  --model <name>               Model (provider default: deepseek-v4-flash or glm-4.7)
-  --base-url <url>             OpenAI-compatible base URL (provider default)
+  --skill-root also selects the canonical DeepSeek root for switchyard skill install/create/remove/sync.
+  --backend <api|codex|claude>  Execution engine; codex/claude use signed-in CLI accounts.
+  --provider <deepseek|glm|anthropic|openai>    Model provider. Default: deepseek
+  --balance-fallback <provider> On HTTP 402, retry with this configured provider (for example: glm).
+  --model <name>               Model (selected provider's default)
+  --base-url <url>             Provider API base URL (provider default)
   --effort <high|max>          Reasoning effort. Default: high
   --thinking <enabled|disabled>
-                               DeepSeek thinking toggle. Default: enabled
+                               Provider thinking toggle. Default: enabled
   --max-tokens <number>        Max output tokens. Default: 16384
   --timeout <ms>               Request timeout per turn. Default: 600000
   --retry-attempts <number>    Max retries for transient fetch failures (0 = keep retrying forever). Default: 0
@@ -136,11 +152,15 @@ Options:
                                Run requested cmd/PowerShell commands without prompting.
   --no-tools                   Disable built-in read-only workspace tools.
   --no-color                   Disable ANSI colors.
+  --tui                       Interactive full-screen view (also with -p).
   --tui-quiet                  Clean-copy mode: no status line, no in-place line rewriting (text streams line-by-line).
+  --compact-provider <name>    Separate summary provider (default: active provider).
+  --compact-model <name>       Separate summary model (default: active model).
+  --compact-base-url <url>     Separate summary endpoint.
   --compact-at <pct>           Auto-compact when estimated context hits this fraction of the limit. Default: 0.9
   --compact-method <method>    auto|llm|truncate|detached|off. Default: auto (LLM summary, truncate fallback on error)
   --compact-limit <tokens|auto> Total context window; auto follows provider/model. Default: auto
-  --compact-keep-recent <n>    Messages kept verbatim after compaction. Default: 40
+  --compact-keep-recent <n>    Complete turns kept after compaction. Default: 15
   --no-compact                 Disable automatic context compaction (alias for --compact-method off).
   -h, --help                   Show help.
 `;
@@ -150,7 +170,9 @@ function parseArgs(argv) {
   const initialProvider = normalizeProvider(process.env.DSW_PROVIDER || process.env.DEEPSEEK_PROVIDER || DEFAULT_PROVIDER);
   const initialConfig = providerConfig(initialProvider);
   const opts = {
+    backend: process.env.SWITCHYARD_BACKEND || null,
     provider: initialProvider,
+    balanceFallbackProvider: process.env.DSW_BALANCE_FALLBACK_PROVIDER || null,
     model: process.env.DSW_MODEL || process.env[`${initialProvider.toUpperCase()}_MODEL`] || initialConfig.model,
     baseUrl: process.env.DSW_BASE_URL || process.env[`${initialProvider.toUpperCase()}_BASE_URL`] || initialConfig.baseUrl,
     effort: "high",
@@ -183,10 +205,13 @@ function parseArgs(argv) {
     agentMission: process.env.DEEPSEEK_AGENT_MISSION || "",
     coordinatorId: process.env.DEEPSEEK_COORDINATOR_ID || null,
     coordDir: process.env.DEEPSEEK_COORD_DIR || null,
+    compactProvider: process.env.DSW_COMPACT_PROVIDER || null,
+    compactModel: process.env.DSW_COMPACT_MODEL || null,
+    compactBaseUrl: process.env.DSW_COMPACT_BASE_URL || null,
     compactAt: Number.parseFloat(process.env.DEEPSEEK_COMPACT_AT || "0.9"),
     compactMethod: process.env.DEEPSEEK_COMPACT_METHOD || "auto",
     contextLimit: process.env.DEEPSEEK_CONTEXT_LIMIT ? Number.parseInt(process.env.DEEPSEEK_CONTEXT_LIMIT, 10) : null,
-    compactKeepRecent: Number.parseInt(process.env.DEEPSEEK_COMPACT_KEEP_RECENT || "40", 10),
+    compactKeepRecent: Number.parseInt(process.env.DSW_COMPACT_KEEP_RECENT || process.env.DEEPSEEK_COMPACT_KEEP_RECENT || "15", 10),
     allowedTargets: [],
     scopeFile: null
   };
@@ -214,11 +239,14 @@ function parseArgs(argv) {
     else if (arg === "--skills") opts.skills.push(...next().split(",").map((item) => item.trim()).filter(Boolean));
     else if (arg === "--skill-root") opts.skillRoots.push(next());
     else if (arg === "--list-skills") opts.listSkills = true;
+    else if (arg === "--backend") { opts.backend = next(); opts.backendExplicit = true; }
     else if (arg === "--provider") {
       opts.provider = normalizeProvider(next());
-      if (!modelExplicit) opts.model = providerConfig(opts.provider).model;
-      if (!baseUrlExplicit) opts.baseUrl = providerConfig(opts.provider).baseUrl;
+      opts.providerExplicit = true;
+      if (!modelExplicit) opts.model = process.env.DSW_MODEL || process.env[`${opts.provider.toUpperCase()}_MODEL`] || providerConfig(opts.provider).model;
+      if (!baseUrlExplicit) opts.baseUrl = process.env.DSW_BASE_URL || process.env[`${opts.provider.toUpperCase()}_BASE_URL`] || providerConfig(opts.provider).baseUrl;
     }
+    else if (arg === "--balance-fallback") opts.balanceFallbackProvider = normalizeProvider(next());
     else if (arg === "--model") { opts.model = next(); modelExplicit = true; opts.modelExplicit = true; }
     else if (arg === "--base-url") { opts.baseUrl = next(); baseUrlExplicit = true; opts.baseUrlExplicit = true; }
     else if (arg === "--effort") opts.effort = next();
@@ -247,18 +275,23 @@ function parseArgs(argv) {
     else if (arg === "--no-save-session") opts.saveSession = false;
     else if (arg === "-o" || arg === "--output" || arg === "--outfile") opts.output = next();
     else if (arg === "--no-output") opts.noOutput = true;
+    else if (arg === "--no-update-check") opts.noUpdateCheck = true;
     else if (arg === "--full-chat") opts.fullChat = true;
     else if (arg === "--dangerously-auto-run-commands") opts.dangerouslyAutoRunCommands = true;
     else if (arg === "--no-tools") opts.tools = false;
     else if (arg === "--no-color") opts.color = false;
+    else if (arg === "--tui") opts.interactiveChat = true;
     else if (arg === "--tui-quiet") opts.tuiQuiet = true;
+    else if (arg === "--compact-provider") opts.compactProvider = normalizeProvider(next());
+    else if (arg === "--compact-model") opts.compactModel = next();
+    else if (arg === "--compact-base-url") opts.compactBaseUrl = next();
     else if (arg === "--compact-at") opts.compactAt = Number.parseFloat(next());
     else if (arg === "--compact-method") opts.compactMethod = next();
     else if (arg === "--compact-limit") {
       const value = next();
       opts.contextLimit = value.toLowerCase() === "auto" ? null : Number.parseInt(value, 10);
     }
-    else if (arg === "--compact-keep-recent") opts.compactKeepRecent = Number.parseInt(next(), 10);
+    else if (arg === "--compact-keep-recent") { opts.compactKeepRecent = Number.parseInt(next(), 10); opts.compactKeepRecentExplicit = true; }
     else if (arg === "--no-compact") opts.compactMethod = "off";
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -267,6 +300,7 @@ function parseArgs(argv) {
 }
 
 function validateOpts(opts) {
+  if (opts.backend && !["api", "codex", "claude"].includes(opts.backend)) throw new Error("--backend must be api, codex, or claude.");
   if (opts.help || opts.printSystem || opts.listSkills) return;
   const promptSources = [opts.prompt, opts.promptFile, opts.stdin].filter(Boolean).length;
   if (promptSources === 0) {
@@ -282,6 +316,7 @@ function validateOpts(opts) {
   if (!Number.isInteger(opts.retryMaxDelay) || opts.retryMaxDelay < opts.retryDelay) throw new Error("--retry-max-delay must be >= --retry-delay.");
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) throw new Error("--timeout must be a positive number.");
   if (opts.permission && !["review", "ask", "full"].includes(opts.permission)) throw new Error("--permission must be review, ask, or full.");
+  if (opts.balanceFallbackProvider && opts.balanceFallbackProvider === opts.provider) throw new Error("--balance-fallback must name a different provider.");
   if (opts.resume && !opts.saveSession) throw new Error("--resume cannot be combined with --no-save-session.");
   if (opts.resume && opts.newSession) throw new Error("--resume and --new cannot be combined.");
   if (opts.scopeFile && opts.allowedTargets.length) throw new Error("Use --scope-file or --allow-target, not both.");
@@ -289,7 +324,7 @@ function validateOpts(opts) {
   if (opts.fullChat && !opts.output) throw new Error("--full-chat requires --output <file> or --outfile <file>.");
   if (!Number.isFinite(opts.compactAt) || opts.compactAt <= 0 || opts.compactAt > 1) throw new Error("--compact-at must be a fraction in (0, 1].");
   if (!["auto", "llm", "truncate", "detached", "off"].includes(opts.compactMethod)) throw new Error("--compact-method must be auto, llm, truncate, detached, or off.");
-  if (!Number.isInteger(opts.compactKeepRecent) || opts.compactKeepRecent < 2) throw new Error("--compact-keep-recent must be an integer >= 2.");
+  if (!Number.isInteger(opts.compactKeepRecent) || opts.compactKeepRecent < 1) throw new Error("--compact-keep-recent must be an integer >= 1.");
   if (opts.contextLimit !== null && (!Number.isFinite(opts.contextLimit) || opts.contextLimit < 2000)) throw new Error("--compact-limit must be auto or at least 2000 tokens.");
 }
 
@@ -314,7 +349,7 @@ async function loadPrompt(opts) {
   return opts.prompt;
 }
 
-// Skills discovery, storage, and the `dsw skill` command group live in
+// Skills discovery, storage, and the `switchyard skill` command group live in
 // ./skills.js (import-safe so the self-tests can unit-test them directly).
 
 function normalizeList(values) {
@@ -341,9 +376,9 @@ function gitBranch() {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-function runtimeContext() {
+async function runtimeContext() {
   const branch = gitBranch();
-  const openAiConfigured = Boolean(process.env.OPENAI_API_KEY);
+  const openAiConfigured = Boolean(await getProviderApiKey("openai"));
   const openAiModel = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
   const searchProviders = configuredSearchProviders();
   return [
@@ -383,7 +418,7 @@ function agentIdentityContext(opts) {
 }
 
 async function loadSystemPrompt(opts) {
-  if (opts.system) return `${opts.system.replace("{{context}}", runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
+  if (opts.system) return `${opts.system.replace("{{context}}", await runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
   let template;
   if (opts.systemFile) {
     template = await readFile(resolve(opts.systemFile), "utf8");
@@ -392,7 +427,7 @@ async function loadSystemPrompt(opts) {
   } else {
     template = await readFile(DEFAULT_SYSTEM_PROMPT_FILE, "utf8");
   }
-  return `${template.replace("{{context}}", runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
+  return `${template.replace("{{context}}", await runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
 }
 
 function color(opts, code, text) {
@@ -517,6 +552,7 @@ function randomStatusPhrase(phrases = STREAM_STATUS_PHRASES) {
 let activeStatusLine = null;
 
 function createStatusLine(opts, phrase = "Working", initialTokens = 0) {
+  if (opts.ui) return opts.ui.status(phrase, initialTokens);
   if (opts.noOutput || opts.tuiQuiet || !process.stdout.isTTY) {
     return {
       isActive() { return false; },
@@ -537,29 +573,44 @@ function createStatusLine(opts, phrase = "Working", initialTokens = 0) {
   let blocked = false;
   let frame = 0;
   let lastRenderAt = 0;
+  // When a streaming markdown writer attaches, it becomes the sole owner of the
+  // bottom terminal row: this status stops drawing to stdout directly and hands
+  // the writer its formatted line() via the attached redraw() on each tick. That
+  // single-writer discipline is what stopped stale status lines leaking into the
+  // scrollback outside VS Code's terminal.
+  let attached = null;
   const started = Date.now();
 
   const modelLabel = String(opts?.model || "").split("/").pop() || "";
   const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  const render = () => {
-    if (!active || blocked) return;
+  const format = () => {
+    const spinner = SPINNER[frame % SPINNER.length];
+    const elapsed = formatDuration(Date.now() - started);
+    const parts = [spinner, currentPhrase, `${tokens} tokens`, elapsed];
+    if (modelLabel) parts.splice(1, 0, modelLabel);
+    return parts.join(" · ");
+  };
+  // Standalone draw (no writer attached): clear the row and redraw in place.
+  const drawStandalone = () => {
+    if (blocked) return;
     const now = Date.now();
     // Throttle: redraw at most every 250ms so terminal selection/copy is not
     // flooded with near-identical status lines.
     if (now - lastRenderAt < 250) return;
     lastRenderAt = now;
-    const spinner = SPINNER[frame % SPINNER.length];
-    frame += 1;
-    const elapsed = formatDuration(Date.now() - started);
-    const parts = [spinner, currentPhrase, `${tokens} tokens`, elapsed];
-    if (modelLabel) parts.splice(1, 0, modelLabel);
-    let text = `  ${parts.join(" · ")}`;
+    let text = `  ${format()}`;
     const columns = Math.max(process.stdout.columns || 120, 1);
     if ([...text].length > columns - 1) text = `${[...text].slice(0, columns - 2).join("")}…`;
     clearLine(process.stdout, 0);
     cursorTo(process.stdout, 0);
     process.stdout.write(dim(opts, text));
     visible = true;
+  };
+  const render = () => {
+    if (!active) return;
+    frame += 1;
+    if (attached) { attached.redraw?.(); return; }
+    drawStandalone();
   };
 
   // Animated spinner: redraws are throttled and skipped while content streams
@@ -593,7 +644,32 @@ function createStatusLine(opts, phrase = "Working", initialTokens = 0) {
     refresh() {
       if (active) render();
     },
+    // The formatted status string for the owning writer to render as its bottom
+    // row; null when there is nothing to show (inactive or blocked).
+    line() {
+      if (!active || blocked) return null;
+      return dim(opts, format());
+    },
+    // Hand bottom-row ownership to a streaming writer. Erase any status this
+    // object drew standalone so the writer can re-park it in its own region.
+    attach(hooks) {
+      attached = hooks || null;
+      if (attached && visible) {
+        clearLine(process.stdout, 0);
+        cursorTo(process.stdout, 0);
+        visible = false;
+      }
+    },
+    detach() { attached = null; },
+    // Erase whatever the owning writer has at the bottom (status or partial)
+    // before some other code writes directly to stdout (e.g. a section heading),
+    // so the pinned status is never stranded above that output.
+    clearRegion() {
+      if (attached) { attached.clearRegion?.(); visible = false; return; }
+      this.clear();
+    },
     clear() {
+      if (attached) { visible = false; return; }
       if (!visible) return;
       clearLine(process.stdout, 0);
       cursorTo(process.stdout, 0);
@@ -601,6 +677,7 @@ function createStatusLine(opts, phrase = "Working", initialTokens = 0) {
     },
     stop() {
       active = false;
+      attached = null;
       clearInterval(timer);
       if (activeStatusLine === status) activeStatusLine = null;
       this.clear();
@@ -749,6 +826,7 @@ function label(opts, icon, text, code = "1;36") {
 }
 
 function heading(opts, text, kind = "info") {
+  if (opts.ui) { if (!["thinking", "final", "tools"].includes(kind)) opts.ui.add(kind, text); return; }
   if (opts.noOutput) return;
   const styles = {
     thinking: ["2;36", ICONS.thinking],
@@ -761,11 +839,13 @@ function heading(opts, text, kind = "info") {
   const [code, icon] = styles[kind] || styles.info;
   const prefix = `${icon} ${text} `;
   const fill = Math.max(0, 72 - prefix.length);
+  if (activeStatusLine) activeStatusLine.clearRegion();
   process.stdout.write(`\n${color(opts, code, prefix)}${dim(opts, "─".repeat(fill))}\n`);
   if (activeStatusLine) activeStatusLine.refresh();
 }
 
 function writeSessionNotice(opts, path) {
+  if (opts.ui) return;
   if (opts.noOutput) return;
   process.stderr.write(`  ${color(opts, "2;35", `${ICONS.session} session`)}  ${dim(opts, terminalLink(opts, path, pathToFileURL(resolve(path)).href))}\n`);
 }
@@ -814,6 +894,7 @@ function writeToolCall(opts, name, rawArgs) {
 }
 
 function writeToolResult(opts, result, knownPaths = []) {
+  if (opts.ui) return;
   if (opts.noOutput) return;
   const text = String(result);
   const display = text.length > 4000 ? `${text.slice(0, 4000)}\n  …` : text;
@@ -1123,7 +1204,7 @@ async function webSearch(args) {
   const requestedProvider = String(args.provider || process.env.WEB_SEARCH_PROVIDER || "auto").trim().toLowerCase();
   if (requestedProvider === "google") {
     const google = await googleSearch(scopedQuery, maxResults);
-    if (!google) throw new Error("Google search is not configured. Set GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID, or run dsw config set-google-search-key and dsw config set-google-search-engine-id.");
+    if (!google) throw new Error("Google search is not configured. Set GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID, or run switchyard config set-google-search-key and switchyard config set-google-search-engine-id.");
     return google;
   }
   if (requestedProvider === "brave") {
@@ -1348,7 +1429,7 @@ function extractOpenAiOutputText(data) {
 }
 
 async function analyzeImageOpenAI(args) {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = await getProviderApiKey("openai");
   if (!apiKey) throw new Error("OPENAI_API_KEY is not set. Create an OpenAI API key, then set $env:OPENAI_API_KEY before running d/dsw.");
 
   const target = assertInsideWorkspace(args.path);
@@ -1407,12 +1488,13 @@ function compactText(value, max = 900) {
 function sessionLabel(item, index) {
   const prompt = item.firstUserPrompt.replace(/\s+/g, " ").slice(0, 70);
   const when = item.updatedAt || item.createdAt || "unknown";
-  const permission = item.permission ? `[${item.permission}]` : "";
+  const permission = `${item.backend && item.backend !== "api" ? `[${item.backend}] ` : ""}${item.permission ? `[${item.permission}]` : ""}`;
   const agent = item.agentId ? ` ${item.agentId}` : "";
   return `${String(index + 1).padStart(2, " ")}  ${when}${agent} ${permission}  ${prompt || "(no prompt)"}`;
 }
 
 async function pickMenu(opts, title, hint, items) {
+  if (opts.startupUi) return (await opts.startupUi.select(title, hint, items)) ?? "quit";
   process.stdout.write(`\n  ${bold(opts, title)}\n`);
   process.stdout.write(`  ${dim(opts, hint)}\n\n`);
   items.forEach((item, i) => {
@@ -1430,7 +1512,7 @@ async function pickMenu(opts, title, hint, items) {
 }
 
 async function pickDashboardAction(opts) {
-  return pickMenu(opts, "DeepSeek Watch", "Enter a number and press Enter. q to quit.", [
+  return pickMenu(opts, "Switchyard", "Choose your next step. Use arrows or a number.", [
     { id: "new", label: "New run" },
     { id: "resume", label: "Resume session" },
     { id: "agents", label: "Agents - send messages, wake parked" },
@@ -1461,64 +1543,84 @@ function promptLine(question) {
 
 async function pickPermission(opts) {
   return pickMenu(opts, "Permission level", "Choose what this session may do.", [
-    { id: "review", label: "Review only - read files, no shell commands" },
-    { id: "ask", label: "Ask before commands - prompt for cmd/PowerShell" },
+    { id: "review", label: (["codex", "claude"].includes(opts.backend) ? "Review - native read-only tools/sandbox" : "Review only - read files, no shell commands") },
+    { id: "ask", label: (["codex", "claude"].includes(opts.backend) ? "Ask - native approval requests appear in Switchyard" : "Ask before commands - prompt for cmd/PowerShell") },
     { id: "full", label: "Full access - auto-run cmd/PowerShell" }
   ]);
 }
 
 async function dashboardOpts() {
   const opts = parseArgs([]);
-  if (!process.stdin.isTTY) {
-    opts.help = true;
-    return opts;
-  }
-
-  for (;;) {
-    const action = await pickDashboardAction(opts);
-    if (action === "quit") {
-      opts.quit = true;
-      return opts;
+  if (!process.stdin.isTTY) { opts.help = true; return opts; }
+  const open = () => {
+    if (process.stdout.isTTY && !opts.tuiQuiet && process.env.TERM !== "dumb") {
+      opts.startupUi = new TerminalUI({ ...opts, provider: "Welcome", model: "Choose a connection" }).start();
+      opts.startupUi.busy = false; opts.startupUi.phase = "Set up your session";
     }
-    if (action === "help") {
-      opts.help = true;
-      return opts;
-    }
-    if (action === "config") {
-      process.stdout.write(`${configPath()}\n`);
-      opts.quit = true;
-      return opts;
-    }
-    if (action === "agents") {
-      await runCoordinationCommand("agents", ["--interactive"]);
-      continue; // return to the dashboard menu after the panel exits
-    }
-
-    if (action === "resume") {
-      opts.resume = true;
-      const picked = await pickSession(opts);
-      opts.session = picked.path;
-      if (picked.agentId && !opts.agentId) opts.agentId = picked.agentId;
-      const session = await readSession(opts.session);
-      renderChatHistory(opts, session);
-    } else {
-      const permission = await pickPermission(opts);
-      if (permission === "quit") {
-        opts.quit = true;
-        return opts;
+  };
+  open();
+  const notice = text => opts.startupUi ? opts.startupUi.add("notice", text) : process.stdout.write(`${text}\n`);
+  const ask = question => opts.startupUi ? opts.startupUi.ask(question) : promptLine(`${question}> `);
+  const choose = async (title, hint, items) => { const result = await pickMenu(opts, title, hint, items); return result === "quit" ? null : result; };
+  try {
+    for (;;) {
+      const action = await pickDashboardAction(opts);
+      if (action === "quit") { opts.quit = true; return opts; }
+      if (action === "help") { opts.help = true; return opts; }
+      if (action === "config") { await ask(`Configuration: ${configPath()}\nPress Enter to return`); continue; }
+      if (action === "agents") {
+        opts.startupUi?.close(); opts.startupUi = null;
+        await runCoordinationCommand("agents", ["--interactive"]); open(); continue;
       }
-      opts.permission = permission;
+      if (action === "resume") {
+        opts.resume = true;
+        let picked;
+        try { picked = await pickSession(opts); } catch (error) { notice(error.message); opts.resume = false; continue; }
+        opts.session = picked.path;
+        opts.providerExplicit = false; opts.modelExplicit = false; opts.baseUrlExplicit = false;
+        const session = await readSession(opts.session);
+        opts.backend = session.config?.backend || "api";
+        opts.provider = session.provider || session.config?.provider || "deepseek";
+        opts.model = session.model;
+        opts.baseUrl = session.baseUrl || (opts.backend === "api" ? providerConfig(opts.provider).baseUrl : undefined);
+        opts.permission = session.config?.permission;
+        if (picked.agentId) opts.agentId = picked.agentId;
+        const decision = await choose("Resume session", `${opts.backend} · ${opts.model || "CLI default"}`, [
+          { id: "keep", label: "Continue with the saved model" },
+          { id: "model", label: "Choose another model", description: "Keep this conversation" },
+          ...(opts.backend === "api" ? [{ id: "provider", label: "Choose another API provider", description: "Keep conversation; use the selected provider's credentials" }] : []),
+          { id: "back", label: "Back" }
+        ]);
+        if (!decision || decision === "back") { opts.resume = false; opts.session = null; opts.agentId = null; continue; }
+        if (decision === "provider") {
+          const provider = await choose("API provider", "This will send the saved context to the selected provider.", CONNECTIONS.filter(c => !["codex", "claude"].includes(c.id)));
+          if (!provider) continue;
+          opts.provider = provider; opts.providerExplicit = true; opts.baseUrl = providerConfig(provider).baseUrl;
+        }
+        if (decision !== "keep") {
+          const model = await chooseModel(opts, choose, ask, notice);
+          if (!model) continue;
+          opts.model = model; opts.modelExplicit = true;
+        }
+      } else {
+        opts.resume = false; opts.session = null; opts.agentId = null;
+        const connection = await choose("Choose a connection", "Use a subscription login or an API key.", CONNECTIONS);
+        if (!connection) continue;
+        opts.backend = ["codex", "claude"].includes(connection) ? connection : "api";
+        if (opts.backend === "api") {
+          opts.provider = connection; opts.providerExplicit = true;
+          opts.baseUrl = providerConfig(connection).baseUrl; opts.model = providerConfig(connection).model;
+        } else { opts.providerExplicit = false; opts.model = null; }
+        const model = await chooseModel(opts, choose, ask, notice);
+        if (!model) continue;
+        opts.model = model; opts.modelExplicit = true;
+        opts.permission = await pickPermission(opts);
+        if (opts.permission === "quit") continue;
+      }
+      opts.interactiveChat = true;
+      return opts;
     }
-    break;
-  }
-  opts.interactiveChat = true;
-  const prompt = await promptLine("Prompt> ");
-  if (!prompt.trim()) {
-    opts.quit = true;
-    return opts;
-  }
-  opts.prompt = prompt;
-  return opts;
+  } finally { opts.startupUi?.close(); opts.startupUi = null; process.stdin.pause(); }
 }
 
 // Coordination agent records (all states) for resume/spawn decisions.
@@ -1553,6 +1655,11 @@ async function pickSession(opts) {
     return { path: items.length ? items[0].path : entries[0].path, agentId: items.length ? (items[0].agentId || null) : entries[0].agentId };
   }
 
+  if (opts.startupUi) {
+    const index = await opts.startupUi.select("Resume a session", "Choose saved work. Model changes are available next.", entries.map((entry, i) => ({ id: String(i), label: entry.label, description: entry.path })));
+    if (index === null) throw new Error("Resume selection cancelled.");
+    return entries[Number(index)];
+  }
   process.stdout.write(`\n  ${bold(opts, "Resume")}\n\n`);
   entries.forEach((entry, i) => {
     process.stdout.write(`  ${String(i + 1).padStart(2, " ")}  ${entry.label}\n`);
@@ -2364,6 +2471,7 @@ function toolSchemas(opts) {
   schemas.push(...runtimeToolSchemas());
   schemas.push(...fuzzToolSchemas());
   schemas.push(...bountyToolSchemas());
+  schemas.push(...dockerToolSchemas());
 
   schemas.push(
     {
@@ -2849,6 +2957,21 @@ function toolSchemas(opts) {
     {
       type: "function",
       function: {
+        name: "list_models",
+        description: "List the models each provider will serve for the configured keys, with the context window this wrapper assumes for each. Use before spawn_agent when choosing a model other than your own.",
+        parameters: {
+          type: "object",
+          properties: {
+            provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Omit to list every configured provider." }
+          },
+          required: [],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
         name: "spawn_agent",
         description: "COORDINATOR-ONLY. Spawn a NEW agent as a detached background process (non-blocking; this agent keeps working). Pulls the current working directory and the shared --coord-dir. FAILS if agent_id already exists — use resume_agent to resume an existing id instead.",
         parameters: {
@@ -2858,7 +2981,8 @@ function toolSchemas(opts) {
             role: { type: "string", enum: ["coordinator", "worker"], description: "Default worker." },
             mission: { type: "string" },
             prompt: { type: "string", description: "Initial prompt for the new agent." },
-            model: { type: "string", description: "Model override (default deepseek-v4-flash)." },
+            provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Model provider for the new agent. Defaults to this agent's own provider. A model from one provider spawned against another's endpoint fails immediately, so set this whenever `model` is not from your own provider." },
+            model: { type: "string", description: "Any model the chosen provider serves. Call list_models to see what is available; omitting it uses the provider default." },
             permission: { type: "string", enum: ["review", "ask", "full"], description: "Default full." }
           },
           required: ["agent_id", "prompt"],
@@ -2877,7 +3001,8 @@ function toolSchemas(opts) {
             agent_id: { type: "string" },
             prompt: { type: "string", description: "Prompt appended to the resumed session." },
             mission: { type: "string", description: "Optional mission override for this launch." },
-            model: { type: "string" },
+            provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Provider for the resumed agent. Defaults to this agent's own provider." },
+            model: { type: "string", description: "Any model the chosen provider serves. Call list_models to see what is available." },
             permission: { type: "string", enum: ["review", "ask", "full"] }
           },
           required: ["agent_id", "prompt"],
@@ -2947,7 +3072,7 @@ function formatTouchedFiles(session) {
 
 function formatOutputMarkdown(opts, session) {
   if (opts.fullChat) {
-    const lines = ["# DeepSeek Watch Transcript", ""];
+    const lines = ["# Switchyard Transcript", ""];
     for (const message of session.messages || []) {
       if (message.role === "system") continue;
       lines.push(`## ${historyTitle(message)}`, "");
@@ -2968,7 +3093,7 @@ function formatOutputMarkdown(opts, session) {
   }
 
   return [
-    "# DeepSeek Watch Result",
+    "# Switchyard Result",
     "",
     "## Final Response",
     "",
@@ -2986,6 +3111,39 @@ async function maybeWriteOutput(opts, session) {
   await writeAtomicMarkdown(opts.output, formatOutputMarkdown(opts, session));
 }
 
+/**
+ * Where to run git, and what to scope it to.
+ *
+ * The git tools used to run at the workspace root always, and pass the caller's
+ * path only as a pathspec. That works when the workspace IS the repository and
+ * fails confusingly when it merely CONTAINS one: a status scoped to a repo
+ * subdirectory, run from a workspace root that is not itself a repo, reports
+ * "fatal: not a git repository" about a repository that is perfectly healthy,
+ * and git_log reports "(no commits)". A worker hit exactly that and correctly
+ * reported it as a tool defect rather than working around it silently.
+ *
+ * So the repository is discovered from the path the caller actually named: walk
+ * up from it until a .git appears, and run git there. The pathspec is kept,
+ * absolute, so scoping still behaves as before for a workspace that is itself a
+ * repo -- git accepts an absolute pathspec inside its own tree.
+ *
+ * The workspace escape guard still runs first, so this cannot be used to reach
+ * a repository outside the workspace.
+ */
+function resolveGitScope(rawPath) {
+  const pathspec = rawPath ? assertInsideWorkspace(rawPath) : null;
+  let probe = pathspec ?? resolve(process.cwd());
+  for (;;) {
+    if (existsSync(join(probe, ".git"))) return { cwd: probe, pathspec };
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  // No repository found above the given path: behave exactly as before, so a
+  // genuine "not a git repository" is still reported rather than hidden.
+  return { cwd: process.cwd(), pathspec };
+}
+
 function assertInsideWorkspace(path) {
   const root = resolve(process.cwd());
   const localPath = path === "/" || path === "\\" ? "." : path;
@@ -2998,6 +3156,7 @@ function assertInsideWorkspace(path) {
 }
 
 function askYesNo(question) {
+  if (activeTerminalUi) return activeTerminalUi.confirm(question);
   if (!process.stdin.isTTY) return Promise.resolve(false);
   return new Promise((resolvePromise) => {
     process.stdout.write(`\n${question} [y/N] `);
@@ -3008,6 +3167,82 @@ function askYesNo(question) {
       resolvePromise(["y", "yes"].includes(data.trim().toLowerCase()));
     });
   });
+}
+
+// Reload PATH from the registry (like Chocolatey's refreshenv) so a relaunch
+// picks up any PATH changes an update may have made. Best-effort and silent.
+function refreshEnvFromRegistry() {
+  if (process.platform !== "win32") return;
+  try {
+    const ps = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command",
+        "$m=[Environment]::GetEnvironmentVariable('Path','Machine');$u=[Environment]::GetEnvironmentVariable('Path','User');\"$m;$u\""],
+      { encoding: "utf8", windowsHide: true, timeout: 8000 }
+    );
+    if (ps.status === 0 && ps.stdout && ps.stdout.trim()) process.env.Path = ps.stdout.trim();
+  } catch { /* leave the inherited PATH in place */ }
+}
+
+// Re-exec the current binary with the same arguments so freshly-pulled source
+// is loaded. Only meaningful for a source run (dev mode); a compiled exe would
+// just re-launch the stale bundle, so callers gate on info.isSource.
+function relaunchSelf() {
+  refreshEnvFromRegistry();
+  const child = spawnSync(process.execPath, process.argv.slice(1), { stdio: "inherit", windowsHide: false });
+  process.exit(child.status ?? 0);
+}
+
+// Codex-style pre-session update gate. Silent unless origin is ahead of the
+// local checkout; then offers update-now / skip-until-next. Never blocks the
+// session on network errors.
+async function maybePromptUpdate(opts) {
+  if (opts.noUpdateCheck || process.env.DSW_NO_UPDATE_CHECK === "1") return;
+  if (!process.stdin.isTTY || !process.stdout.isTTY || opts.noOutput) return;
+
+  let info;
+  try { info = await checkForUpdates({ timeoutMs: 6000 }); } catch { return; }
+  if (!info || info.status !== "update-available") return;
+  if (await isSkipped(info.remoteSha)) return;
+
+  const arrow = `${info.shortCurrent} → ${info.shortRemote} (origin/${info.branch})`;
+  process.stdout.write(`\n${label(opts, "⇪", "Update available", "1;33")}  ${dim(opts, arrow)}\n`);
+
+  if (info.dirty) {
+    // Never touch a checkout with uncommitted work — just inform.
+    process.stdout.write(`  ${color(opts, "1;31", "You have local changes")} in ${dim(opts, info.repoDir)}.\n`);
+    process.stdout.write(`  ${dim(opts, "Commit or stash them, then update with: git pull --ff-only")}\n`);
+    const ans = await promptLine(`  Continue this session on the current version? [Y/n] `);
+    if (["n", "no"].includes(ans.trim().toLowerCase())) opts.quit = true;
+    return;
+  }
+
+  const ans = await promptLine(`  ${bold(opts, "[U]")}pdate now   ${bold(opts, "[S]")}kip until next update   ${bold(opts, "[Enter]")} not now: `);
+  const choice = ans.trim().toLowerCase();
+
+  if (choice === "u" || choice === "update") {
+    process.stdout.write(`  ${dim(opts, "Fetching and fast-forwarding…")}\n`);
+    const res = await performUpdate(info.repoDir, info.branch);
+    if (!res.ok) {
+      process.stdout.write(`  ${color(opts, "1;31", "Update failed")} (${res.phase}): ${res.message}\n  ${dim(opts, "Continuing on the current version.")}\n`);
+      return;
+    }
+    await clearSkipped();
+    process.stdout.write(`  ${color(opts, "1;32", "Updated")} to ${res.newSha.slice(0, 9)}.\n`);
+    if (info.isSource) {
+      process.stdout.write(`  ${dim(opts, "Restarting to load the update…")}\n`);
+      relaunchSelf(); // replaces this process
+      return;
+    }
+    // Compiled exe: the pulled source needs a rebuild to take effect.
+    process.stdout.write(`  ${color(opts, "1;33", "Rebuild required")}: ${dim(opts, "run 'npm run build:exe' (or install.ps1) so the exe picks it up. Continuing on the current version for now.")}\n`);
+    return;
+  }
+
+  if (choice === "s" || choice === "skip") {
+    try { await setSkipped(info.remoteSha); } catch {}
+    process.stdout.write(`  ${dim(opts, "Skipped — you'll be prompted again when a newer update lands.")}\n`);
+  }
 }
 
 function runLocalCommand(exe, args, timeoutMs, cwd = process.cwd()) {
@@ -3425,7 +3660,7 @@ function setUserEnvironmentVariable(name, value) {
 
 async function doctor() {
   const deepSeekKey = await getDeepSeekApiKey();
-  const openAiKey = process.env.OPENAI_API_KEY || "";
+  const openAiKey = await getProviderApiKey("openai");
   const googleSearchKey = process.env.GOOGLE_SEARCH_API_KEY || "";
   const googleSearchEngineId = process.env.GOOGLE_SEARCH_ENGINE_ID || process.env.GOOGLE_CSE_ID || "";
   const braveSearchKey = process.env.BRAVE_SEARCH_API_KEY || "";
@@ -3436,17 +3671,19 @@ async function doctor() {
   const dswStatus = commandStatus("dsw", ["--help"]);
   const pbcStatus = commandStatus("pbc", ["--help"]);
   const lines = [
-    "DeepSeek Watch Doctor",
+    "Switchyard Doctor",
     "",
     `Workspace: ${process.cwd()}`,
     `Node: ${process.version}`,
     `Config path: ${configPath()}`,
     `DeepSeek API key: ${deepSeekKey ? "configured" : "not_configured"}`,
     `GLM API key: ${(await getProviderApiKey("glm")) ? "configured" : "not_configured"}`,
+    `Claude API key: ${(await getProviderApiKey("anthropic")) ? "configured" : "not_configured"}`,
+    `OpenAI API key: ${openAiKey ? "configured" : "not_configured"}`,
     "",
     "DeepSeek",
     `  API key: ${deepSeekKey ? maskedSecretStatus(deepSeekKey) : "not set"}`,
-    `  Setup: dsw config set-key <deepseek-key>`,
+    `  Setup: switchyard config set-key <deepseek-key>`,
     "",
     "OpenAI vision",
     `  OPENAI_API_KEY: ${maskedSecretStatus(openAiKey)}`,
@@ -3455,7 +3692,7 @@ async function doctor() {
     "  Create key: https://platform.openai.com/api-keys",
     "  Billing/limits: https://platform.openai.com/settings/organization/billing/overview",
     "  Current terminal: $env:OPENAI_API_KEY = \"sk-proj-...\"",
-    "  Persist for new terminals: dsw config set-openai-key <openai-key>",
+    "  Persist for new terminals: switchyard config set-openai-key <openai-key>",
     "",
     "Web search",
     `  default provider: ${selectedSearchProvider()}`,
@@ -3464,8 +3701,8 @@ async function doctor() {
     `  GOOGLE_SEARCH_ENGINE_ID: ${googleSearchEngineId ? "set" : "not set"}`,
     `  BRAVE_SEARCH_API_KEY: ${maskedSecretStatus(braveSearchKey)}`,
     "  Google setup: https://programmablesearchengine.google.com/controlpanel/all",
-    "  Persist Google key: dsw config set-google-search-key <google-api-key>",
-    "  Persist Google engine: dsw config set-google-search-engine-id <engine-id>",
+    "  Persist Google key: switchyard config set-google-search-key <google-api-key>",
+    "  Persist Google engine: switchyard config set-google-search-engine-id <engine-id>",
     "",
     "CLI",
     `  dsw on PATH: ${dswStatus.ok ? "yes" : "no"}`,
@@ -3478,6 +3715,52 @@ async function doctor() {
     skills.length > 8 ? `  ... ${skills.length - 8} more` : ""
   ].filter((line) => line !== "");
   return lines.join("\n");
+}
+
+async function runBalanceCommand(args) {
+  let minimum = null;
+  let currency = "USD";
+  let json = false;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    const next = () => {
+      i += 1;
+      if (i >= args.length) throw new Error(`Missing value for ${arg}`);
+      return args[i];
+    };
+    if (arg === "--minimum") minimum = Number.parseFloat(next());
+    else if (arg === "--currency") currency = String(next()).trim().toUpperCase();
+    else if (arg === "--json") json = true;
+    else throw new Error(`Unknown balance option: ${arg}`);
+  }
+
+  if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0)) {
+    throw new Error("--minimum must be a non-negative amount.");
+  }
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error("--currency must be a three-letter currency code.");
+
+  const status = await getProviderBalance("deepseek", {
+    apiKey: await getDeepSeekApiKey(),
+    timeoutMs: 10_000
+  });
+  const checkedAt = new Date().toISOString();
+  const belowMinimum = minimum === null ? null : isBelowMinimum(status, minimum, currency);
+  const result = { ...status, checkedAt, minimum, minimumCurrency: currency, belowMinimum };
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    const lines = ["DeepSeek balance", `Checked: ${checkedAt}`, `API available: ${status.available ? "yes" : "no"}`];
+    for (const balance of status.balances) {
+      lines.push(`${balance.currency}: ${balance.total.toFixed(2)} total (${balance.toppedUp.toFixed(2)} topped up, ${balance.granted.toFixed(2)} granted)`);
+    }
+    if (minimum !== null) lines.push(`Minimum ${currency} ${minimum.toFixed(2)}: ${belowMinimum ? "BELOW" : "ok"}`);
+    if (belowMinimum) lines.push(`Top up manually: ${DEEPSEEK_TOP_UP_URL}`);
+    process.stdout.write(`${lines.join("\n")}\n`);
+  }
+
+  if (!status.available || belowMinimum) process.exitCode = 2;
 }
 
 // Shell tools accept a working directory: absolute paths are used as-is,
@@ -3669,7 +3952,7 @@ async function runTool(opts, name, args) {
 
   if (name === "compact_session") {
     const session = activeSession(opts);
-    const meta = await compactSession({ ...opts, compactForce: Boolean(args.force) }, session);
+    const meta = await compactSession({ ...opts, compactMethod: opts.compactMethod === "detached" ? "auto" : opts.compactMethod, compactForce: Boolean(args.force) }, session);
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
     return jsonResult(meta || { compacted: false, usage: estimateContextTokens(session.messages) });
   }
@@ -3678,6 +3961,7 @@ async function runTool(opts, name, args) {
     return jsonResult(await compactAgentSession(opts, args));
   }
 
+  if (name === "list_models") return jsonResult(await listProviderModels(args));
   if (name === "spawn_agent") return jsonResult(await spawnSwarmAgent(opts, args, { resume: false }));
   if (name === "resume_agent") return jsonResult(await spawnSwarmAgent(opts, args, { resume: true }));
 
@@ -4328,26 +4612,29 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
   }
 
   if (name === "git_status") {
+    const scope = resolveGitScope(args.path);
     const gitArgs = ["status", "--short", "--branch"];
-    if (args.path) gitArgs.push("--", assertInsideWorkspace(args.path));
-    const r = await runGit(gitArgs);
+    if (scope.pathspec) gitArgs.push("--", scope.pathspec);
+    const r = await runGit(gitArgs, scope.cwd);
     return r.out.trim() || r.err.trim() || "clean";
   }
 
   if (name === "git_diff") {
+    const scope = resolveGitScope(args.path);
     const gitArgs = ["diff"];
     if (args.staged) gitArgs.push("--staged");
     if (args.target_branch) gitArgs.push(String(args.target_branch));
-    if (args.path) gitArgs.push("--", assertInsideWorkspace(args.path));
-    const r = await runGit(gitArgs);
+    if (scope.pathspec) gitArgs.push("--", scope.pathspec);
+    const r = await runGit(gitArgs, scope.cwd);
     return r.out || "(no diff)";
   }
 
   if (name === "git_log") {
     const max = Math.min(Number(args.max_entries) || 20, 100);
+    const scope = resolveGitScope(args.path);
     const gitArgs = ["log", `--max-count=${max}`, "--oneline", "--decorate"];
-    if (args.path) gitArgs.push("--", assertInsideWorkspace(args.path));
-    const r = await runGit(gitArgs);
+    if (scope.pathspec) gitArgs.push("--", scope.pathspec);
+    const r = await runGit(gitArgs, scope.cwd);
     return r.out.trim() || "(no commits)";
   }
 
@@ -4550,6 +4837,10 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
     return runFuzzTool(name, args, { ...opts, askYesNo }, { cwd: process.cwd(), taskId: taskKey });
   }
 
+  if (name.startsWith("docker_") && name !== "docker_cleanup") {
+    return runDockerTool(name, args, { ...opts, askYesNo });
+  }
+
   if (name.startsWith("h1_") || name.startsWith("bounty_") || name === "docker_cleanup") {
     return runBountyTool(name, args, { ...opts, askYesNo }, { cwd: process.cwd(), taskId: taskKey });
   }
@@ -4640,6 +4931,10 @@ function repairToolCallHistory(messages) {
 }
 
 function installStreamInterruptHandler(opts, controller) {
+  if (opts.ui) {
+    opts.ui.interrupt = () => { opts.interrupted = true; controller.abort(); };
+    return () => { opts.ui.interrupt = null; };
+  }
   if (!opts.interactiveChat || !process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
     return () => {};
   }
@@ -4665,10 +4960,45 @@ function installStreamInterruptHandler(opts, controller) {
   };
 }
 
+/**
+ * Reports what one turn cost, and how much of it the provider had cached.
+ *
+ * Caching on DeepSeek and Z.ai is implicit: the provider matches a repeated
+ * prefix by itself, bills those tokens at roughly a fifth of the fresh rate,
+ * and says nothing unless asked. Without this line a run's cache-hit rate is
+ * unknowable, which makes "is this model worth it" unanswerable.
+ *
+ * The two providers name the field differently -- DeepSeek reports
+ * `prompt_cache_hit_tokens` at the top level, Z.ai reports
+ * `prompt_tokens_details.cached_tokens` -- so both are read and whichever is
+ * present wins. A provider that reports neither shows a hit rate of zero
+ * rather than a wrong number.
+ *
+ * Contained: this is a diagnostic on the hot path of every turn, and a
+ * malformed usage block must not end a run that otherwise succeeded.
+ */
+function reportTokenUsage(opts, usage) {
+  try {
+    if (!usage || opts.noOutput) return;
+    const prompt = Number(usage.prompt_tokens) || 0;
+    const completion = Number(usage.completion_tokens) || 0;
+    const cached = Number(
+      usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0,
+    ) || 0;
+    if (!prompt && !completion) return;
+    const written = usage.prompt_tokens_details?.cache_write_tokens || 0;
+    const share = prompt > 0 ? Math.round((cached / prompt) * 100) : 0;
+    if (opts.ui) { opts.ui.usage = { prompt, completion, cached, written, share }; opts.ui.schedule(); return; }
+    process.stderr.write(dim(opts, `  tokens in=${prompt} cached=${cached} (${share}%) cache_written=${written} out=${completion}\n`));
+  } catch {
+    // A diagnostic that throws is worse than one that is missing.
+  }
+}
+
 async function streamChat(opts, messages, toolsEnabled = opts.tools) {
-  const apiKey = await getProviderApiKey(opts.provider);
-  const provider = providerConfig(opts.provider);
-  if (!apiKey) throw new Error(`No ${provider.label} API key found. Run: dsw config set-${opts.provider === "glm" ? "glm-" : ""}key <key>`);
+  let apiKey = await getProviderApiKey(opts.provider);
+  let provider = providerConfig(opts.provider);
+  if (!apiKey) throw new Error(`No ${provider.label} API key found. Run: switchyard config set-${opts.provider === "deepseek" ? "" : `${opts.provider}-`}key <key>`);
 
   // One attempt per iteration. Transient failures (network blips, per-attempt
   // timeouts, HTTP 429/5xx) retry with exponential backoff instead of taking
@@ -4683,82 +5013,55 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
     }, opts.timeout);
     const cleanupInterrupt = installStreamInterruptHandler(opts, controller);
     const toolCalls = [];
+    let usage = null;
+    let providerState;
     let content = "";
     let reasoningContent = "";
     let finishReason = "";
     let phase = "";
     let status = createStatusLine(opts, randomStatusPhrase());
-    const reasoningWriter = createMarkdownWriter(opts, (text) => dim(opts, text), { status });
-    const contentWriter = createMarkdownWriter(opts, (text) => applyKnownFileLinks(opts, text, opts.touchedFiles || []), { status });
+    const reasoningWriter = opts.ui ? opts.ui.writer("reasoning") : createMarkdownWriter(opts, (text) => dim(opts, text), { status });
+    const contentWriter = opts.ui ? opts.ui.writer("assistant") : createMarkdownWriter(opts, (text) => applyKnownFileLinks(opts, text, opts.touchedFiles || []), { status });
     const ensureToolStatus = () => {
       if (status.isActive()) return status;
       status = createStatusLine(opts, "Preparing tools");
       return status;
     };
     try {
-      const body = {
-        model: opts.model,
-        messages,
-        stream: true,
-        max_tokens: opts.maxTokens
-      };
-      applyThinkingOptions(body, opts);
-      if (toolsEnabled) body.tools = toolSchemas(opts);
+      for await (const data of providerStream(opts, messages, {
+        apiKey, tools: toolsEnabled ? toolSchemas(opts) : [], signal: controller.signal
+      })) {
+        if (data.usage) usage = data.usage;
+        if (data.providerState) providerState = data.providerState;
+        const choice = data.choices?.[0] || {};
+        const delta = choice.delta || {};
+        if (choice.finish_reason) finishReason = choice.finish_reason;
 
-      const response = await fetch(`${opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(body)
-      });
-
-      if (!response.ok) throw await deepSeekHttpError(response, provider.label);
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      for await (const chunk of response.body) {
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-          const data = JSON.parse(payload);
-          const choice = data.choices?.[0] || {};
-          const delta = choice.delta || {};
-          if (choice.finish_reason) finishReason = choice.finish_reason;
-
-          if (delta.reasoning_content) {
-            status.addTokens(delta.reasoning_content);
-            if (phase !== "thinking") {
-              heading(opts, "thinking", "thinking");
-              phase = "thinking";
-            }
-            reasoningContent += delta.reasoning_content;
-            if (!opts.noOutput) reasoningWriter.write(delta.reasoning_content);
+        if (delta.reasoning_content) {
+          status.addTokens(delta.reasoning_content);
+          if (phase !== "thinking") {
+            heading(opts, "thinking", "thinking");
+            phase = "thinking";
           }
+          reasoningContent += delta.reasoning_content;
+          if (!opts.noOutput) reasoningWriter.write(delta.reasoning_content);
+        }
 
-          if (delta.content) {
-            status.addTokens(delta.content);
-            if (phase !== "final") {
-              heading(opts, "final", "final");
-              phase = "final";
-            }
-            content += delta.content;
-            if (!opts.noOutput) contentWriter.write(delta.content);
+        if (delta.content) {
+          status.addTokens(delta.content);
+          if (phase !== "final") {
+            heading(opts, "final", "final");
+            phase = "final";
           }
+          content += delta.content;
+          if (!opts.noOutput) contentWriter.write(delta.content);
+        }
 
-          if (delta.tool_calls) {
-            const toolStatus = ensureToolStatus();
-            toolStatus.setPhrase("Preparing tools");
-            toolStatus.addTokens(JSON.stringify(delta.tool_calls));
-            mergeToolDelta(toolCalls, delta.tool_calls);
-          }
+        if (delta.tool_calls) {
+          const toolStatus = ensureToolStatus();
+          toolStatus.setPhrase("Preparing tools");
+          toolStatus.addTokens(JSON.stringify(delta.tool_calls));
+          mergeToolDelta(toolCalls, delta.tool_calls);
         }
       }
 
@@ -4769,9 +5072,12 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
       // Some thinking-model streams end at the token limit with an index-only
       // tool delta. It is not callable and must not poison the next turn.
       const validToolCalls = toolCalls.filter((call) => String(call.function?.name || "").trim());
+      reportTokenUsage(opts, usage);
       return {
         role: "assistant",
         content,
+        ...(providerState ? { providerState } : {}),
+        usage,
         reasoning_content: reasoningContent,
         finishReason: finishReason || undefined,
         tool_calls: validToolCalls.length ? validToolCalls : undefined
@@ -4782,6 +5088,7 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
       // timeout end the turn with an interrupted marker instead of retrying.
       const userInterrupt = opts.interrupted || (error?.name === "AbortError" && !timedOut);
       if (userInterrupt) {
+        opts.ui?.add("notice", "Interrupted by user");
         if (!opts.noOutput) process.stdout.write("\n");
         return {
           role: "assistant",
@@ -4789,6 +5096,29 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
           reasoning_content: reasoningContent,
           interrupted: true
         };
+      }
+      if (error?.status === 402 && opts.balanceFallbackProvider && !opts.balanceFallbackUsed) {
+        const fallbackName = normalizeProvider(opts.balanceFallbackProvider);
+        const fallbackKey = fallbackName === opts.provider ? "" : await getProviderApiKey(fallbackName);
+        if (fallbackKey) {
+          const fallback = providerConfig(fallbackName);
+          if (!opts.noOutput) heading(opts, `${provider.label} balance exhausted; switching this agent to ${fallback.label}`, "warn");
+          opts.provider = fallbackName;
+          opts.model = fallback.model;
+          opts.baseUrl = fallback.baseUrl;
+          opts.contextLimit = contextLimitFor(fallbackName, opts.model);
+          if (opts.sessionObject) {
+            await ensureContextCompact(opts, opts.sessionObject);
+            messages = opts.sessionObject.messages;
+          }
+          opts.balanceFallbackUsed = true;
+          apiKey = fallbackKey;
+          provider = fallback;
+          attempt = 0;
+          continue;
+        }
+        const reason = fallbackName === opts.provider ? "is already active" : "is not configured";
+        error.message = `${error.message} Balance fallback '${fallbackName}' ${reason}.`;
       }
       const exhausted = Number(opts.retryAttempts) > 0 && attempt >= Number(opts.retryAttempts);
       if (exhausted || !isRetryableFetchError(error)) throw error;
@@ -4808,6 +5138,8 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
 }
 
 async function ensureContextCompact(opts, session) {
+  opts.compactToolTokens = estimateTokens(JSON.stringify(opts.tools ? toolSchemas(opts) : []));
+  if (session.config) session.config.compactToolTokens = opts.compactToolTokens;
   if (opts.compactMethod === "off") return null;
   let meta;
   if (opts.compactMethod === "detached") {
@@ -4830,7 +5162,7 @@ async function ensureContextCompact(opts, session) {
   if (meta && !opts.noOutput) {
     const budget = meta.messagesBudget || meta.limit;
     const pct = Math.round(((meta.usageScaled || meta.usage) / budget) * 100);
-    heading(opts, `context ~${pct}% of ${formatCompactCount(budget)} — auto-compacted (${meta.method}: est ${formatCompactCount(meta.usage)} → ${formatCompactCount(meta.projectedTokens)} tokens, folded ${meta.foldedMessages} messages, kept ${meta.keptMessages})`, "warn");
+    heading(opts, `context ~${pct}% of ${formatCompactCount(budget)} — auto-compacted (${meta.method}: est ${formatCompactCount(meta.usage)} → ${formatCompactCount(meta.projectedTokens)} tokens, folded ${meta.foldedMessages} messages, kept ${meta.keptTurns} complete turns / ${meta.keptMessages} messages)`, "warn");
   }
   return meta;
 }
@@ -4872,19 +5204,85 @@ async function compactAgentSession(opts, args) {
   if (!record.session) throw new Error(`agent '${target}' has no session file on record.`);
   const session = JSON.parse(await readFile(record.session, "utf8"));
   const meta = await compactSession(
-    { ...opts, compactMethod: method, compactForce: true, maxTokens: opts.maxTokens || 16384 },
+    { ...session.config, provider: session.provider || session.config?.provider, model: session.model, baseUrl: session.baseUrl, contextLimit: session.config?.contextLimit || contextLimitFor(session.provider || session.config?.provider, session.model), compactMethod: method, compactForce: true, maxTokens: session.config?.maxTokens || 16384 },
     session
   );
   if (meta) {
     const original = await readFile(record.session, "utf8");
     await writeFile(`${record.session}.compact-bak`, original, "utf8");
-    await writeFile(record.session, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+    await writeSession(record.session, session);
   }
   return { status: meta ? "compacted_file" : "not_needed", agent: target, session: record.session, meta: meta || null };
 }
 
 // Coordinator-only swarm growth: spawn or resume an agent in its OWN detached
 // PowerShell window (launch.ps1-style) so the current agent keeps working.
+/**
+ * Models each provider will serve, discovered once per session.
+ *
+ * Filled at startup and again on resume, so a long-lived agent picks up models
+ * released since it began rather than being frozen at whatever existed when it
+ * first ran. Never fatal: a provider whose catalog cannot be fetched is stored
+ * as null, and every check below treats null as "unknown, allow" so an
+ * unreachable models endpoint cannot stop a spawn that would have worked.
+ */
+const providerModelCatalog = new Map();
+
+async function loadProviderModelCatalog(provider, options = {}) {
+  const normalized = normalizeProvider(provider);
+  let apiKey = null;
+  try {
+    apiKey = await getProviderApiKey(normalized);
+  } catch {
+    apiKey = null;
+  }
+  const models = await fetchProviderModels(normalized, apiKey, options);
+  providerModelCatalog.set(normalized, models);
+  return models;
+}
+
+function knownModelsFor(provider) {
+  return providerModelCatalog.get(normalizeProvider(provider)) ?? null;
+}
+
+/**
+ * Refuses a model the provider does not list, with the alternatives in hand.
+ *
+ * A spawn that dies on an unknown model wastes a detached process and a
+ * coordination record, and the failure surfaces minutes later as a dead agent
+ * rather than as a rejected tool call.
+ */
+async function assertModelAvailable(provider, model) {
+  const normalized = normalizeProvider(provider);
+  let models = knownModelsFor(normalized);
+  if (models === undefined || models === null) {
+    models = await loadProviderModelCatalog(normalized);
+  }
+  if (!models) return;
+  if (!models.includes(model)) {
+    throw new Error(`Provider '${normalized}' does not serve model '${model}'. Available: ${models.join(", ")}`);
+  }
+}
+
+async function listProviderModels(args) {
+  const providers = args?.provider
+    ? [normalizeProvider(args.provider)]
+    : Object.keys(PROVIDERS);
+  const out = {};
+  for (const provider of providers) {
+    let models = knownModelsFor(provider);
+    if (models === undefined || models === null) models = await loadProviderModelCatalog(provider);
+    out[provider] = models
+      ? models.map((model) => ({
+          model,
+          context_limit: contextLimitFor(provider, model),
+          context_limit_known: hasKnownContextLimit(model)
+        }))
+      : { error: "catalog unavailable — the key may be unset or the models endpoint unreachable" };
+  }
+  return out;
+}
+
 async function spawnSwarmAgent(opts, args, { resume }) {
   if (opts.agentRole !== "coordinator") {
     throw new Error("spawn_agent / resume_agent are coordinator-only. Workers may not spawn agents; message the coordinator to scale the swarm.");
@@ -4906,7 +5304,13 @@ async function spawnSwarmAgent(opts, args, { resume }) {
   const role = String(args.role || "worker").toLowerCase();
   if (!["coordinator", "worker"].includes(role)) throw new Error("role must be coordinator or worker.");
   const mission = String(args.mission || "").replace(/'/g, "''");
-  const model = String(args.model || opts.model || "deepseek-v4-flash");
+  // The child's provider is chosen, not inherited. It used to take the
+  // coordinator's provider while accepting an independent model, so a GLM model
+  // requested by a DeepSeek coordinator was sent to DeepSeek's endpoint and died
+  // on "the supported API model names are deepseek-*, but you passed glm-*".
+  const provider = normalizeProvider(args.provider || opts.provider);
+  const model = String(args.model || (provider === opts.provider ? opts.model : "") || providerConfig(provider).model);
+  await assertModelAvailable(provider, model);
   const permission = String(args.permission || "full");
   const coordDir = String(opts.coordDir || coordinationRoot());
   const cwd = String(process.cwd()).replace(/'/g, "''");
@@ -4924,13 +5328,21 @@ async function spawnSwarmAgent(opts, args, { resume }) {
     "--agent-role", role,
     "--coordinator-id", opts.agentId,
     ...(mission ? ["--agent-mission", mission] : []),
-    "--provider", opts.provider,
+    "--provider", provider,
     "--model", model,
     "--coord-dir", coordDir,
     "--permission", permission,
+    "--compact-keep-recent", String(opts.compactKeepRecent || 15),
+    ...(opts.compactProvider ? ["--compact-provider", opts.compactProvider] : []),
+    ...(opts.compactModel ? ["--compact-model", opts.compactModel] : []),
+    ...(opts.compactBaseUrl ? ["--compact-base-url", opts.compactBaseUrl] : []),
     "--compact-method", "auto",
     "--compact-at", "0.9",
-    "--compact-limit", String(opts.contextLimit || contextLimitFor(opts.provider, model)),
+    // The CHILD's limit, from the child's own provider and model. Passing the
+    // coordinator's limit gave a 200K worker a 1M budget when a DeepSeek
+    // coordinator spawned a GLM one, so auto-compaction would not have fired
+    // until long past the point the model could still answer.
+    "--compact-limit", String(contextLimitFor(provider, model)),
     "-p", prompt
   ];
   const child = spawn(nodeExe, workerArgs, { detached: true, stdio: "ignore", windowsHide: true });
@@ -5016,6 +5428,10 @@ async function processAgentTurns(opts, session) {
     const compacted = await ensureContextCompact(opts, session);
     if (compacted && opts.saveSession) await writeSession(opts.session, touchSession(session));
     const response = await streamChat(opts, session.messages);
+    session.provider = opts.provider;
+    session.model = opts.model;
+    session.baseUrl = opts.baseUrl;
+    session.config.provider = opts.provider;
     const { finishReason, ...assistant } = response;
     session.messages.push(assistant);
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
@@ -5055,6 +5471,7 @@ async function processAgentTurns(opts, session) {
           const startedAt = Date.now();
           const execution = await executeToolCall(opts, call);
           execution.durationMs = Date.now() - startedAt;
+          opts.ui?.finishTool(call.id, toolDisplayResult(execution.name, execution.args, execution.result), execution.durationMs, isToolError(execution.result));
           return execution;
         }));
       } finally {
@@ -5076,6 +5493,7 @@ async function processAgentTurns(opts, session) {
       } else {
         execution = executions.shift();
       }
+      if (sequential) opts.ui?.finishTool(call.id, toolDisplayResult(execution.name, execution.args, execution.result), execution.durationMs, isToolError(execution.result));
       toolTracker.complete(trackerIds.get(call.id), execution.durationMs, isToolError(execution.result));
       writeToolResult(opts, toolDisplayResult(execution.name, execution.args, execution.result), collectPathLikeValues(execution.args));
       session.messages.push({ role: "tool", tool_call_id: execution.call.id, content: String(execution.result) });
@@ -5083,6 +5501,7 @@ async function processAgentTurns(opts, session) {
       session.cache = { ...(opts.sessionCache || {}) };
       if (opts.saveSession) await writeSession(opts.session, touchSession(session));
     }
+    if (opts.ui?.stopRequested) { opts.ui.stopRequested = false; opts.ui.add("notice", "Stopped after completing current tool batch"); return; }
     if (opts.agentWaitRequest) return;
     await deliverPendingAgentMessages(opts, session);
   }
@@ -5169,6 +5588,15 @@ async function deliverPendingAgentMessages(opts, session, messages = null) {
 // the wait poll delivers it, waking the session. No-op for headless/spawned
 // agents (no TTY) or when output is suppressed.
 function installParkedInputHandler(opts, agentId, onAbort) {
+  if (opts.ui) {
+    opts.ui.interrupt = onAbort;
+    opts.ui.onSubmit = text => {
+      void sendAgentMessage(opts.coordDir, { from: "operator", to: agentId, body: text, type: "message" })
+        .then(() => opts.ui.add("user", text)).catch(error => opts.ui.add("error", error.message));
+    };
+    for (const text of opts.ui.queue.splice(0)) opts.ui.onSubmit(text);
+    return () => { opts.ui.onSubmit = null; opts.ui.interrupt = null; };
+  }
   if (!opts.interactiveChat || !process.stdin.isTTY || typeof process.stdin.setRawMode !== "function" || opts.noOutput) {
     return () => {};
   }
@@ -5328,7 +5756,7 @@ function cliLaunchEnv() {
 function launchElectronUi(argv) {
   const opts = parseUiArgs(argv);
   if (opts.help) {
-    process.stdout.write("Usage: d -ui [--ui-port 17891] [--ui-cdp-port 9223]\n");
+    process.stdout.write("Usage: switchyard -ui [--ui-port 17891] [--ui-cdp-port 9223]\n");
     return;
   }
   const electron = electronCommand();
@@ -5471,7 +5899,7 @@ async function runCoordinationCommand(command, argv) {
   }
   if (command === "message" || command === "wake") {
     const [to, ...bodyParts] = opts.positional;
-    if (!to) throw new Error(`Usage: d ${command} <agent-id> ${command === "message" ? "<message>" : "[message]"} [--from <agent-id>] [--coord-dir <dir>]`);
+    if (!to) throw new Error(`Usage: switchyard ${command} <agent-id> ${command === "message" ? "<message>" : "[message]"} [--from <agent-id>] [--coord-dir <dir>]`);
     const body = bodyParts.join(" ").trim() || "Wake up, inspect your coordination inbox and current mission, then continue safely.";
     const message = await sendAgentMessage(opts.coordDir, {
       from: opts.from,
@@ -5487,7 +5915,7 @@ async function runCoordinationCommand(command, argv) {
   }
   if (command === "inbox") {
     const [agentId] = opts.positional;
-    if (!agentId) throw new Error("Usage: d inbox <agent-id> [--coord-dir <dir>]");
+    if (!agentId) throw new Error("Usage: switchyard inbox <agent-id> [--coord-dir <dir>]");
     const messages = await readAgentInbox(opts.coordDir, agentId);
     process.stdout.write(`${JSON.stringify(messages, null, 2)}\n`);
     return;
@@ -5499,14 +5927,69 @@ async function runCoordinationCommand(command, argv) {
   throw new Error(`Unknown coordination command: ${command}`);
 }
 
+async function handleApiSlash(opts, session, text) {
+  const command = parseSlash(text); if (!command) return false;
+  const notice = message => opts.ui ? opts.ui.add("notice", message) : process.stdout.write(`${message}\n`);
+  const ask = question => opts.ui ? opts.ui.ask(question) : promptLine(`${question}> `);
+  const choose = async (title, hint, items) => {
+    if (opts.ui) return opts.ui.select(title, hint, items);
+    const result = await pickMenu(opts, title, hint, items); return result === "quit" ? null : result;
+  };
+  try {
+    if (["help", "commands"].includes(command.name)) notice(SLASH_HELP);
+    else if (command.name === "session") notice(`API · ${opts.provider} / ${opts.model}\n${sessionPath(opts.session)}`);
+    else if (command.name === "usage") notice(`Context estimate: ${estimateContextTokens(session.messages).toLocaleString()} tokens\n${opts.ui?.usage ? JSON.stringify(opts.ui.usage) : "No response usage reported yet."}`);
+    else if (["model", "provider"].includes(command.name)) {
+      let provider = opts.provider;
+      if (command.name === "provider") {
+        provider = await choose("API provider", "The conversation will be sent to this provider.", CONNECTIONS.filter(c => !["codex", "claude"].includes(c.id)));
+        if (!provider) return true;
+      }
+      if (!await getProviderApiKey(provider)) throw new Error(`Configure the ${provider} API key before switching.`);
+      const target = { ...opts, provider, backend: "api", baseUrl: provider === opts.provider ? opts.baseUrl : providerConfig(provider).baseUrl };
+      const model = command.name === "model" && command.argument ? command.argument : await chooseModel(target, choose, ask, notice);
+      if (!model) return true;
+      applyApiModel(opts, session, provider, model, contextLimitFor);
+      if (opts.saveSession) await writeSession(opts.session, touchSession(session));
+      notice(`Using ${provider} / ${model}. Conversation kept.`);
+    } else notice(`Unknown command /${command.name}.\n${SLASH_HELP}`);
+  } catch (error) { notice(error.message); }
+  return true;
+}
+
 async function run() {
   const argv = process.argv.slice(2);
+  if (["login", "auth"].includes(argv[0])) {
+    if (!["codex", "claude"].includes(argv[1])) throw new Error("Usage: switchyard login|auth codex|claude");
+    await nativeAuth(argv[1], argv[0] === "login" ? "login" : "status");
+    return;
+  }
   if (argv[0] === "-ui" || argv[0] === "--ui" || argv[0] === "ui") {
     launchElectronUi(argv.slice(1));
     return;
   }
   if (argv[0] === "doctor") {
     process.stdout.write(`${await doctor()}\n`);
+    return;
+  }
+  if (argv[0] === "update") {
+    const info = await checkForUpdates({ timeoutMs: 8000 });
+    if (info.status === "unknown") { process.stdout.write("Not a git checkout — cannot self-update.\n"); return; }
+    if (info.status === "offline") { process.stdout.write("Could not reach origin (offline?). Try again later.\n"); return; }
+    if (info.status === "up-to-date") { process.stdout.write(`Already up to date (${info.shortCurrent}).\n`); return; }
+    if (info.dirty && argv[1] !== "--force") {
+      process.stdout.write(`Update available (${info.shortCurrent} → ${info.shortRemote}) but the checkout has local changes.\nCommit or stash them, then re-run 'switchyard update'.\n`);
+      return;
+    }
+    process.stdout.write(`Updating ${info.shortCurrent} → ${info.shortRemote} (origin/${info.branch})…\n`);
+    const res = await performUpdate(info.repoDir, info.branch);
+    if (!res.ok) { process.stdout.write(`Update failed (${res.phase}): ${res.message}\n`); process.exitCode = 1; return; }
+    await clearSkipped();
+    process.stdout.write(`Updated to ${res.newSha.slice(0, 9)}.${info.isSource ? " Restart dsw to load it." : " Rebuild the exe (npm run build:exe) to load it."}\n`);
+    return;
+  }
+  if (argv[0] === "balance") {
+    await runBalanceCommand(argv.slice(1));
     return;
   }
   if (argv[0] === "skill") {
@@ -5532,7 +6015,7 @@ async function run() {
     const list = await loadAllowlist();
     if (command === "allow") {
       if (!domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) {
-        process.stdout.write("Usage: dsw security allow <domain>  (e.g. dsw security allow example.com)\n");
+        process.stdout.write("Usage: switchyard security allow <domain>  (e.g. switchyard security allow example.com)\n");
         return;
       }
       if (!list.domains.includes(domain)) {
@@ -5556,20 +6039,16 @@ async function run() {
       );
       return;
     }
-    process.stdout.write("Usage: dsw security allow <domain> | dsw security remove <domain> | dsw security list\n");
+    process.stdout.write("Usage: switchyard security allow <domain> | switchyard security remove <domain> | switchyard security list\n");
     return;
   }
 
   if (argv[0] === "config") {
     const command = argv[1];
-    if (command === "set-key" || command === "set-glm-key") {
-      const provider = command === "set-glm-key" ? "glm" : "deepseek";
+    if (["set-key", "set-glm-key", "set-anthropic-key", "set-claude-key", "set-openai-key"].includes(command)) {
+      const provider = command === "set-key" ? "deepseek" : normalizeProvider(command.slice(4, -4));
       await setProviderApiKey(provider, argv[2] || "");
       process.stdout.write(`Saved ${providerConfig(provider).label} API key to ${configPath()}\n`);
-      return;
-    }
-    if (command === "set-openai-key") {
-      process.stdout.write(`${setUserEnvironmentVariable("OPENAI_API_KEY", argv[2] || "")}\n`);
       return;
     }
     if (command === "set-google-search-key") {
@@ -5584,16 +6063,22 @@ async function run() {
       process.stdout.write(`${configPath()}\n`);
       return;
     }
-    throw new Error("Unknown config command. Use: dsw config set-key <key>, dsw config set-glm-key <key>, dsw config set-openai-key <key>, dsw config set-google-search-key <key>, or dsw config set-google-search-engine-id <engine-id>");
+    throw new Error("Unknown config command. Use: switchyard config set-key <key>, switchyard config set-glm-key <key>, switchyard config set-anthropic-key <key>, switchyard config set-openai-key <key>, switchyard config set-google-search-key <key>, or switchyard config set-google-search-engine-id <engine-id>");
   }
 
   const opts = argv.length === 0 ? await dashboardOpts() : parseArgs(argv);
   if (opts.quit) return;
   validateOpts(opts);
 
+  // Codex-style "update available" gate before an interactive session begins.
+  if (opts.interactiveChat && !opts.quit && !opts.help) {
+    await maybePromptUpdate(opts);
+    if (opts.quit) return;
+  }
+
   if (opts.interactiveChat && !opts.quit && process.stdout.isTTY) {
     const cwdName = String(process.cwd()).split(/[\\/]/).filter(Boolean).pop() || "workspace";
-    setTerminalTitle(`dsw · ${cwdName}`);
+    setTerminalTitle(`Switchyard · ${cwdName}`);
   }
 
   if (opts.help) {
@@ -5613,6 +6098,13 @@ async function run() {
     opts.session = picked.path;
     if (picked.agentId && !opts.agentId) opts.agentId = picked.agentId;
   }
+  const nativeSaved = opts.session && opts.resume ? await readSession(opts.session) : null;
+  if (!opts.backendExplicit && nativeSaved?.config?.backend) opts.backend = nativeSaved.config.backend;
+  if (["codex", "claude"].includes(opts.backend)) {
+    await runNativeChat(opts, { prompt: promptLine, confirm: askYesNo, stdin: readStdin });
+    return;
+  }
+  if (nativeSaved?.config?.backend && nativeSaved.config.backend !== "api") throw new Error("This session uses a native backend. Resume without --backend api.");
   // Tie a stable agent id to a single session file: reuse the agent's most
   // recent session instead of scattering one session per launch. Pass --new
   // to start a fresh session for the agent id.
@@ -5640,10 +6132,21 @@ async function run() {
   }
   if (opts.resume || autoAgentSession) {
     resumedSession = await readSession(opts.session);
-    if (resumedSession.config?.provider) opts.provider = normalizeProvider(resumedSession.config.provider);
+    if (!opts.providerExplicit && (resumedSession.config?.provider || resumedSession.provider)) opts.provider = normalizeProvider(resumedSession.config?.provider || resumedSession.provider);
+    const switchedProvider = opts.providerExplicit && opts.provider !== (resumedSession.config?.provider || resumedSession.provider);
+    if (switchedProvider) {
+      if (!opts.modelExplicit) opts.model = providerConfig(opts.provider).model;
+      if (!opts.baseUrlExplicit) opts.baseUrl = providerConfig(opts.provider).baseUrl;
+    }
+    for (const key of ["compactProvider", "compactModel", "compactBaseUrl"]) {
+      if (!opts[key] && resumedSession.config?.[key]) opts[key] = resumedSession.config[key];
+    }
+    if (!opts.compactKeepRecentExplicit && !process.env.DSW_COMPACT_KEEP_RECENT && !process.env.DEEPSEEK_COMPACT_KEEP_RECENT && resumedSession.config?.compactionVersion === 2) {
+      opts.compactKeepRecent = resumedSession.config.compactKeepRecent || 15;
+    }
     if (!opts.coordinatorId && resumedSession.config?.coordinatorId) opts.coordinatorId = resumedSession.config.coordinatorId;
-    if (!opts.modelExplicit && resumedSession.model) opts.model = resumedSession.model;
-    if (!opts.baseUrlExplicit && resumedSession.baseUrl) opts.baseUrl = resumedSession.baseUrl;
+    if (!switchedProvider && !opts.modelExplicit && resumedSession.model) opts.model = resumedSession.model;
+    if (!switchedProvider && !opts.baseUrlExplicit && resumedSession.baseUrl) opts.baseUrl = resumedSession.baseUrl;
     if (!opts.skills.length && Array.isArray(resumedSession.config?.skills)) {
       opts.skills = normalizeList(resumedSession.config.skills);
     }
@@ -5658,6 +6161,19 @@ async function run() {
   opts.coordDir = coordinationRoot(opts.coordDir || resumedSession?.config?.coordDir);
   if (opts.contextLimit === null) opts.contextLimit = contextLimitFor(opts.provider, opts.model);
 
+  // Discover this provider's models once per session. Runs here rather than
+  // lazily so it also happens on resume: a resumed agent is a new process and
+  // must see models released since it last ran. Failure is non-fatal by
+  // construction -- fetchProviderModels returns null instead of throwing.
+  await loadProviderModelCatalog(opts.provider, { baseUrl: opts.baseUrl });
+  if (!hasKnownContextLimit(opts.model)) {
+    process.stderr.write(
+      `[dsw] no context window is recorded for '${opts.model}'; assuming ${opts.contextLimit} tokens. `
+      + `Auto-compaction will run earlier than necessary rather than later than safe.
+`
+    );
+  }
+
   opts.skills = normalizeList(opts.skills);
   opts.skillRoots = normalizeList(opts.skillRoots);
 
@@ -5667,7 +6183,8 @@ async function run() {
     return;
   }
 
-  const userPrompt = await loadPrompt(opts);
+  const emptyInteractive = opts.interactiveChat && !opts.prompt && !opts.promptFile && !opts.stdin && !opts.tuiQuiet && !opts.noOutput && process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== "dumb";
+  const userPrompt = emptyInteractive ? "" : await loadPrompt(opts);
   if (opts.quit) return;
   if (!opts.session) {
     opts.session = newSessionPath();
@@ -5709,6 +6226,13 @@ async function run() {
   session.config = {
     ...(session.config || {}),
     provider: opts.provider,
+    compactProvider: opts.compactProvider,
+    compactModel: opts.compactModel,
+    compactBaseUrl: opts.compactBaseUrl,
+    compactKeepRecent: opts.compactKeepRecent,
+    compactionVersion: 2,
+    contextLimit: opts.contextLimit,
+    maxTokens: opts.maxTokens,
     permission: opts.permission,
     toolMode: opts.toolMode,
     skills: opts.skills,
@@ -5719,6 +6243,10 @@ async function run() {
     coordDir: opts.coordDir,
     coordinatorId: opts.coordinatorId
   };
+  if (session.provider !== opts.provider || session.model !== opts.model) {
+    for (const message of session.messages) delete message.providerState;
+  }
+  session.provider = opts.provider; session.model = opts.model; session.baseUrl = opts.baseUrl;
   opts.touchedFiles = new Set(session.touchedFiles || []);
   opts.sessionCache = { ...(session.cache || {}) };
   opts.sessionObject = session;
@@ -5737,14 +6265,18 @@ async function run() {
   }
   if (!opts.noOutput) process.stderr.write(`Agent: ${opts.agentId} (${opts.agentRole})\nCoordination: ${opts.coordDir}\n`);
 
-  if (opts.resume || autoAgentSession) {
+  if ((opts.resume || autoAgentSession) && userPrompt) {
     session.messages.push({ role: "user", content: userPrompt });
   }
 
+  if (opts.interactiveChat && !opts.noOutput && !opts.tuiQuiet && process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== "dumb") {
+    opts.ui = new TerminalUI(opts).start(session.messages);
+    activeTerminalUi = opts.ui;
+  }
   try {
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
     if (opts.saveSession) writeSessionNotice(opts, sessionPath(opts.session));
-    await runCoordinatedAgent(opts, session);
+    if (userPrompt) await runCoordinatedAgent(opts, session);
     session.touchedFiles = [...opts.touchedFiles];
     session.cache = { ...(opts.sessionCache || {}) };
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
@@ -5752,10 +6284,12 @@ async function run() {
 
     while (opts.interactiveChat) {
       const contextTokens = formatCompactCount(estimateContextTokens(session.messages));
-      process.stdout.write(`\n  ${dim(opts, `Enter to send, /exit to quit, Ctrl+C to exit · context ${contextTokens} tokens`)}\n`);
-      const nextPrompt = await promptLine("  > ");
+      if (!opts.ui) process.stdout.write(`\n  ${dim(opts, `Enter to send, /exit to quit, Ctrl+C to exit · context ${contextTokens} tokens`)}\n`);
+      const nextPrompt = opts.ui ? await opts.ui.nextPrompt() : await promptLine("  > ");
       if (!nextPrompt.trim()) continue;
       if (isExitCommand(nextPrompt)) break;
+      if (await handleApiSlash(opts, session, nextPrompt)) continue;
+      if (opts.ui) { opts.ui.busy = true; opts.ui.add("user", nextPrompt); }
       session.messages.push({ role: "user", content: nextPrompt });
       if (opts.saveSession) await writeSession(opts.session, touchSession(session));
       await runCoordinatedAgent(opts, session);
@@ -5768,6 +6302,10 @@ async function run() {
   } catch (error) {
     await opts.agentRuntime.stop("failed", { error: error.message });
     throw error;
+  } finally {
+    opts.ui?.close();
+    if (opts.ui) process.stdin.pause();
+    activeTerminalUi = null;
   }
 }
 

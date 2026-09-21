@@ -215,4 +215,131 @@ check("tool tracker noOutput silent", () => {
   tracker.complete(id + 1, 120, true); // unknown id — no crash
 });
 
+// ── Regression: pinned status must never leak into the scrollback ────────────
+// The reported bug: while a reply streamed, the "· model · Drafting · N tokens"
+// status line was reprinted between content lines and left behind on every
+// terminal except VS Code's. This replays the writer's REAL byte output through
+// a tiny terminal emulator (handling \n, \r and the CSI cursor/erase codes the
+// writer emits) and asserts the status only ever occupies the transient bottom
+// row — never a committed scrollback row above real content.
+function renderVT(data) {
+  const rows = [""];
+  let cy = 0;
+  let cx = 0;
+  const ensure = () => { while (rows.length <= cy) rows.push(""); };
+  const put = (text) => {
+    ensure();
+    let line = rows[cy];
+    if (cx > line.length) line = line.padEnd(cx, " ");
+    rows[cy] = line.slice(0, cx) + text + line.slice(cx + text.length);
+    cx += text.length;
+  };
+  for (let i = 0; i < data.length;) {
+    const ch = data[i];
+    if (ch === "\x1b" && data[i + 1] === "[") {
+      let j = i + 2;
+      let params = "";
+      while (j < data.length && /[0-9;]/.test(data[j])) { params += data[j]; j += 1; }
+      const final = data[j];
+      const n = parseInt(params, 10) || 0;
+      if (final === "A") cy = Math.max(0, cy - (n || 1));
+      else if (final === "B") { cy += (n || 1); ensure(); }
+      else if (final === "K") { ensure(); rows[cy] = ""; }
+      else if (final === "G") cx = Math.max(0, (n || 1) - 1);
+      i = j + 1;
+      continue;
+    }
+    if (ch === "\x1b" && data[i + 1] === "]") { // OSC hyperlink — skip to ST/BEL
+      let j = i + 2;
+      while (j < data.length && !(data[j] === "\x07" || (data[j] === "\x1b" && data[j + 1] === "\\"))) j += 1;
+      i = data[j] === "\x07" ? j + 1 : j + 2;
+      continue;
+    }
+    if (ch === "\x1b") { i += 1; continue; }
+    if (ch === "\n") { cy += 1; cx = 0; ensure(); i += 1; continue; }
+    if (ch === "\r") { cx = 0; i += 1; continue; }
+    put(ch);
+    i += 1;
+  }
+  return rows.map((r) => r.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+}
+
+// A minimal status implementing the contract the writer depends on: line() /
+// attach() / detach(). tick() simulates the animation timer firing between
+// stream chunks (which is exactly when the old code leaked a status line).
+function mockStatus() {
+  let attached = null;
+  let tokens = 0;
+  let active = true;
+  return {
+    line() { return active ? `<STATUS ${tokens}tok>` : null; },
+    attach(hooks) { attached = hooks || null; },
+    detach() { attached = null; },
+    tick() { tokens += 7; attached?.redraw?.(); },
+    stop() { active = false; },
+    isActive() { return active; },
+    refresh() { attached?.redraw?.(); },
+    setBlocked() {}, setPhrase() {}, setTokens() {}, addTokens() {}, clear() {}
+  };
+}
+
+function withLiveTty(cols, fn) {
+  const chunks = [];
+  const orig = process.stdout.write;
+  const origIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  const origCols = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+  process.stdout.write = (s) => { chunks.push(s); return true; };
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  Object.defineProperty(process.stdout, "columns", { value: cols, configurable: true });
+  try { fn(chunks); } finally {
+    process.stdout.write = orig;
+    if (origIsTTY) Object.defineProperty(process.stdout, "isTTY", origIsTTY); else delete process.stdout.isTTY;
+    if (origCols) Object.defineProperty(process.stdout, "columns", origCols); else delete process.stdout.columns;
+  }
+  return chunks;
+}
+
+const STREAM_LINES = ["Thinking about the plan.", "Second line here.", "Third and final line."];
+
+check("status line never leaks into scrollback while streaming", () => {
+  const status = mockStatus();
+  const chunks = withLiveTty(60, () => {
+    const w = createMarkdownWriter(colorOn, (t) => t, { status });
+    // Stream in fragments with the status animating between every fragment —
+    // the exact interleaving that used to strand a status line per paragraph.
+    const deltas = ["Think", "ing about ", "the plan.\n", "Second ", "line here.\n", "Third ", "and final line."];
+    for (const d of deltas) { w.write(d); status.tick(); }
+    w.flush();
+  });
+  const screen = renderVT(chunks.join(""));
+  const statusRows = screen.filter((r) => r.includes("<STATUS"));
+  assert.equal(statusRows.length, 0, `status leaked ${statusRows.length} line(s) into scrollback: ${JSON.stringify(statusRows)}`);
+  for (const line of STREAM_LINES) {
+    const hits = screen.filter((r) => r.trim() === line).length;
+    assert.equal(hits, 1, `expected "${line}" exactly once, saw ${hits}`);
+  }
+});
+
+check("status stays a single transient bottom row mid-stream", () => {
+  const status = mockStatus();
+  const chunks = withLiveTty(60, () => {
+    const w = createMarkdownWriter(colorOn, (t) => t, { status });
+    // Stop BEFORE flush: mid-stream the bottom may show the status, but it must
+    // be the only status row and must sit below all committed content.
+    const deltas = ["Thinking about the plan.\n", "Second line here.\n", "Third "];
+    for (const d of deltas) { w.write(d); status.tick(); }
+  });
+  const screen = renderVT(chunks.join(""));
+  const statusIdx = screen.map((r, i) => (r.includes("<STATUS") ? i : -1)).filter((i) => i >= 0);
+  assert.ok(statusIdx.length <= 1, `more than one status row on screen: ${statusIdx.length}`);
+  if (statusIdx.length === 1) {
+    const below = screen.slice(statusIdx[0] + 1).filter((r) => r.trim().length && !r.includes("<STATUS"));
+    assert.equal(below.length, 0, `content committed below the status row: ${JSON.stringify(below)}`);
+  }
+  // The two completed lines are committed exactly once regardless of the status.
+  for (const line of STREAM_LINES.slice(0, 2)) {
+    assert.equal(screen.filter((r) => r.trim() === line).length, 1, `"${line}" not committed once`);
+  }
+});
+
 console.log(`\nAll ${passed} TUI checks passed.`);

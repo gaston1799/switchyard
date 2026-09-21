@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 export const SESSION_DIR = ".deepseek-watch/sessions";
@@ -21,7 +22,11 @@ export async function readSession(path) {
 export async function writeSession(path, session) {
   const file = resolve(path);
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+    await rename(temporary, file);
+  } finally { await unlink(temporary).catch(() => {}); }
 }
 
 export async function listSessions(dir = SESSION_DIR) {
@@ -45,6 +50,7 @@ export async function listSessions(dir = SESSION_DIR) {
         createdAt: session.createdAt || "",
         workspace: session.workspace || "",
         permission: session.config?.permission || "",
+        backend: session.config?.backend || "api",
         agentId: session.config?.agentId || "",
         firstUserPrompt: session.messages?.find((message) => message.role === "user")?.content || ""
       });
@@ -69,7 +75,7 @@ export function newSession({ provider, model, baseUrl, workspace, systemPrompt, 
     config,
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
+      ...(userPrompt ? [{ role: "user", content: userPrompt }] : [])
     ]
   };
 }

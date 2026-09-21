@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { deepSeekHttpError } from "./api-error.js";
 import { getProviderApiKey } from "./config.js";
 import { normalizeProvider, providerConfig } from "./providers.js";
-import { applyThinkingOptions } from "./deepseek-request.js";
+import { completeProvider } from "./provider-transport.js";
 import { isRetryableFetchError, retryBackoffMs } from "./fetch-retry.js";
 
 const DEFAULT_OUTPUT = "deepseek-result.md";
@@ -23,7 +23,7 @@ Options:
   --prompt-file <file>      Read prompt content from a file.
   --stdin                   Read prompt content from stdin.
   -o, --output <file>       Markdown output file. Default: ${DEFAULT_OUTPUT}
-  --provider <deepseek|glm> Model provider. Default: deepseek
+  --provider <deepseek|glm|anthropic|openai> Model provider. Default: deepseek
   --model <name>            Model (provider default)
   --base-url <url>          OpenAI-compatible base URL (provider default)
   --effort <high|max>       Reasoning effort. Default: high
@@ -78,8 +78,8 @@ function parseArgs(argv) {
     else if (arg === "-o" || arg === "--output") opts.output = next();
     else if (arg === "--provider") {
       opts.provider = normalizeProvider(next());
-      if (!modelExplicit) opts.model = providerConfig(opts.provider).model;
-      if (!baseUrlExplicit) opts.baseUrl = providerConfig(opts.provider).baseUrl;
+      if (!modelExplicit) opts.model = process.env.DSW_MODEL || process.env[`${opts.provider.toUpperCase()}_MODEL`] || providerConfig(opts.provider).model;
+      if (!baseUrlExplicit) opts.baseUrl = process.env.DSW_BASE_URL || process.env[`${opts.provider.toUpperCase()}_BASE_URL`] || providerConfig(opts.provider).baseUrl;
     }
     else if (arg === "--model") { opts.model = next(); modelExplicit = true; }
     else if (arg === "--base-url") { opts.baseUrl = next(); baseUrlExplicit = true; }
@@ -175,7 +175,7 @@ async function spawnDetached(opts) {
 async function callDeepSeek(opts, prompt) {
   const provider = providerConfig(opts.provider);
   const apiKey = await getProviderApiKey(opts.provider);
-  if (!apiKey) throw new Error(`No ${provider.label} API key found. Run: dsw config set-${opts.provider === "glm" ? "glm-" : ""}key <key>`);
+  if (!apiKey) throw new Error(`No ${provider.label} API key found. Run: dsw config set-${opts.provider === "deepseek" ? "" : `${opts.provider}-`}key <key>`);
 
   // Retry transient fetch failures (network blips, timeouts, HTTP 429/5xx)
   // with exponential backoff instead of crashing. --retry-attempts 0 keeps
@@ -185,31 +185,10 @@ async function callDeepSeek(opts, prompt) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeout);
     try {
-      const response = await fetch(`${opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(applyThinkingOptions({
-          model: opts.model,
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: opts.maxTokens
-        }, opts))
-      });
-
-      const text = await response.text();
-      if (!response.ok) throw await deepSeekHttpError(new Response(text, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers
-      }), provider.label);
-
-      const data = JSON.parse(text);
-      const content = data?.choices?.[0]?.message?.content;
+      const result = await completeProvider(opts, [{ role: "user", content: prompt }], { apiKey, signal: controller.signal });
+      const content = result.content;
       if (typeof content !== "string" || content.length === 0) {
-        throw new Error("DeepSeek returned no final content.");
+        throw new Error("Provider returned no final content.");
       }
       return content;
     } catch (error) {

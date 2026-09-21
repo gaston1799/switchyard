@@ -9,3 +9,7 @@ dist/
 
 .codex-handoffs/
 
+# Local source recovery copies
+*.bak
+*.pre-gitfix
+

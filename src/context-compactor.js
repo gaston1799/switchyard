@@ -24,17 +24,18 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deepSeekHttpError } from "./api-error.js";
 import { getProviderApiKey } from "./config.js";
-import { providerConfig } from "./providers.js";
-import { applyThinkingOptions } from "./deepseek-request.js";
+import { providerConfig, normalizeProvider, contextLimitFor } from "./providers.js";
+import { completeProvider } from "./provider-transport.js";
+import { conversationTurns, isCompactionSummary } from "./conversation-turns.js";
+
 import { isRetryableFetchError, retryBackoffMs } from "./fetch-retry.js";
 
-export const DEFAULT_CONTEXT_LIMIT = 1_048_576; // deepseek-v4-class models: 2^20 total context (messages + completion)
+export const DEFAULT_CONTEXT_LIMIT = 1_000_000;
 export const DEFAULT_COMPLETION_TOKENS = 16_384;
 export const DEFAULT_COMPACT_THRESHOLD = 0.9;
-export const DEFAULT_KEEP_RECENT = 40;
-export const DEFAULT_TAIL_BUDGET_RATIO = 0.1;
+export const DEFAULT_KEEP_RECENT = 15;
 const DEFAULT_SUMMARY_INPUT_TOKENS = 200_000;
-const COMPACT_TIMEOUT_MS = 180_000;
+const COMPACT_TIMEOUT_MS = 30_000;
 const COMPACT_MAX_OUTPUT_TOKENS = 4096;
 // chars/4 under-counts code/JSON-heavy transcripts; judge the budget against a
 // scaled usage so compaction triggers before the real tokenizer rejects the
@@ -52,7 +53,7 @@ export function estimateTokens(text) {
 export function estimateMessageTokens(message) {
   if (!message || typeof message !== "object") return 0;
   let total = estimateTokens(message.role || "") + 4;
-  total += estimateTokens(message.content || "");
+  total += estimateTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content || ""));
   total += estimateTokens(message.reasoning_content || "");
   if (message.name) total += estimateTokens(message.name);
   if (message.tool_call_id) total += estimateTokens(message.tool_call_id);
@@ -64,7 +65,7 @@ export function estimateMessageTokens(message) {
       total += estimateTokens(call.function?.arguments || "");
     }
   }
-  return total;
+  return Math.max(total, message.providerState ? estimateTokens(JSON.stringify(message.providerState)) : 0);
 }
 
 export function estimateContextTokens(messages) {
@@ -85,47 +86,36 @@ export function computeCompactionPlan(messages, options = {}) {
   const list = Array.isArray(messages) ? messages : [];
   const limit = Math.max(Number(options.limit) || DEFAULT_CONTEXT_LIMIT, 2000);
   const threshold = clampRatio(options.threshold, DEFAULT_COMPACT_THRESHOLD);
-  const keepRecent = Math.max(Number(options.keepRecent) || DEFAULT_KEEP_RECENT, 2);
-  const tailBudget = Math.max(Number(options.tailBudgetRatio) || DEFAULT_TAIL_BUDGET_RATIO, 0.05) * limit;
-  // The API counts messages + completion against ONE context window; the
-  // messages budget is what remains after reserving the completion budget.
-  const completion = Math.min(Math.max(Number(options.completionTokens) || DEFAULT_COMPLETION_TOKENS, 0), Math.floor(limit / 2));
-  const messagesBudget = Math.max(limit - completion, 1000);
-  const scaled = (raw) => Math.round(raw * TOKEN_ESTIMATE_SAFETY);
-
-  const usageRaw = estimateContextTokens(list);
-  const usage = scaled(usageRaw);
+  const keepRecent = Number(options.keepRecent ?? DEFAULT_KEEP_RECENT);
+  if (!Number.isInteger(keepRecent) || keepRecent < 1) throw new Error("keepRecent must be a positive number of complete turns");
+  const completion = Math.max(Number(options.completionTokens ?? DEFAULT_COMPLETION_TOKENS), 0);
+  const toolTokens = Math.max(Number(options.toolTokens) || 0, 0);
+  const messagesBudget = limit - completion;
+  if (messagesBudget <= 0) throw new Error("Completion budget leaves no room for context");
+  const usageRaw = estimateContextTokens(list) + toolTokens;
+  const usage = Math.ceil(usageRaw * TOKEN_ESTIMATE_SAFETY);
   const target = messagesBudget * threshold;
-  if (usage < target) {
-    return { needed: false, usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, keepStart: -1, prefix: [], tail: list, prefixTokens: 0, tailTokens: usageRaw };
+  const base = { usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, toolTokens, keepRecent };
+  const noOp = () => ({ ...base, needed: false, keepStart: -1, prefix: [], tail: list, prefixTokens: 0, tailTokens: usageRaw });
+  if (!options.force && usage < target) return noOp();
+  const turns = conversationTurns(list);
+  const foldTurns = Math.max(0, turns.complete.length - keepRecent);
+  if (!foldTurns) {
+    if (usage > messagesBudget) throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
+    return noOp();
   }
-
-  // Ideal cut: everything before the most recent `keepRecent` messages.
-  let keepStart = Math.max(1, list.length - keepRecent);
-
-  // Never start the kept tail on an orphaned tool result (its assistant
-  // tool_calls message lives just before the cut).
-  while (keepStart > 0 && list[keepStart]?.role === "tool") keepStart -= 1;
-
-  // Nothing left to fold (system + one message), or tail is the whole list.
-  if (keepStart <= 1 || keepStart >= list.length - 1) {
-    return { needed: false, usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, keepStart: -1, prefix: [], tail: list, prefixTokens: 0, tailTokens: usageRaw };
-  }
-
-  // Shrink the tail from the old side while it exceeds the tail budget.
-  // Always stop on a non-tool boundary so the suffix stays API-consistent.
-  while (keepStart < list.length - 1) {
-    if (scaled(estimateContextTokens(list.slice(keepStart))) <= tailBudget) break;
-    keepStart += 1;
-    while (keepStart < list.length - 1 && list[keepStart]?.role === "tool") keepStart += 1;
-  }
-
+  const keepStart = turns.complete[foldTurns].start;
   const prefix = list.slice(0, keepStart);
   const tail = list.slice(keepStart);
-  const prefixTokens = estimateContextTokens(prefix);
-  const tailTokens = estimateContextTokens(tail);
-  const projectedTokens = scaled(tailTokens) + estimateTokens('<context_compaction></context_compaction>');
-  return { needed: true, usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, keepStart, prefix, tail, prefixTokens, tailTokens, projectedTokens };
+  const instructions = list.slice(0, turns.instructionsEnd);
+  const retainedTokens = estimateContextTokens([...instructions, ...tail]) + toolTokens;
+  // Reserve room for summary wrapper and validate the actual result again before mutation.
+  const summaryBudget = Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(messagesBudget / TOKEN_ESTIMATE_SAFETY - retainedTokens - 128));
+  if (summaryBudget < 128) throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
+  return { ...base, needed: true, keepStart, prefix, tail, instructions, keptTurns: keepRecent,
+    activeTurn: turns.activeStart !== null, foldedTurns: foldTurns, summaryBudget,
+    prefixTokens: estimateContextTokens(prefix), tailTokens: estimateContextTokens(tail),
+    projectedTokens: Math.ceil((retainedTokens + summaryBudget + 128) * TOKEN_ESTIMATE_SAFETY) };
 }
 
 // ---------------------------------------------------------------------------
@@ -134,51 +124,18 @@ export function computeCompactionPlan(messages, options = {}) {
 // ---------------------------------------------------------------------------
 
 export function truncateTranscriptForSummary(messages, maxTokens = DEFAULT_SUMMARY_INPUT_TOKENS) {
-  const list = Array.isArray(messages) ? messages : [];
-  if (!list.length) return "(empty transcript)";
-  const budgetChars = Math.max(Number(maxTokens) || DEFAULT_SUMMARY_INPUT_TOKENS, 4000) * 4;
-  const perMessage = 500;
-
-  const render = (message) => {
-    const role = message.role || "message";
-    const prefixBits = [];
-    if (message.tool_call_id) prefixBits.push(`tool:${message.tool_call_id}`);
-    if (Array.isArray(message.tool_calls)) {
-      prefixBits.push(`tool_calls: ${message.tool_calls.map((call) => call.function?.name || "?").join(", ")}`);
-    }
-    let text = String(message.content || "");
-    if (message.role === "assistant" && message.reasoning_content) {
-      text = `${text} [reasoning: ${String(message.reasoning_content).slice(0, 160)}…]`;
-    }
-    const prefix = prefixBits.length ? `[${prefixBits.join(" | ")}] ` : "";
-    return `[${role}] ${prefix}${text}`;
-  };
-
-  const lines = list.map(render);
-  let total = 0;
-  for (const line of lines) total += Math.min(line.length, perMessage) + 1;
-
-  if (total <= budgetChars) return lines.map((line) => (line.length > perMessage ? `${line.slice(0, perMessage)}…` : line)).join("\n");
-
-  // Head + tail: keep the mission start and the immediately-pre-tail context.
-  const headRatio = 0.3;
-  const headLines = [];
-  const tailLines = [];
-  let headChars = 0;
-  let tailChars = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const capped = line.length > perMessage ? `${line.slice(0, perMessage)}…` : line;
-    if (i < lines.length * headRatio && headChars < budgetChars * headRatio) {
-      headLines.push(capped);
-      headChars += capped.length + 1;
-    } else if (tailChars < budgetChars * (1 - headRatio)) {
-      tailLines.push(capped);
-      tailChars += capped.length + 1;
-    }
-  }
-  const marker = `… [${list.length - headLines.length - tailLines.length} messages elided for compaction input] …`;
-  return [...headLines, marker, ...tailLines].join("\n");
+  const budget = Math.max(1, Math.floor(Number(maxTokens))) * 4;
+  const lines = (messages || []).map((message) => {
+    const calls = (message.tool_calls || []).map((call) => `${call.function?.name}: ${call.function?.arguments}`).join("; ");
+    const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content || "");
+    return `[${message.role}] ${calls ? `[tool_calls: ${calls}] ` : ""}${text}`.slice(0, isCompactionSummary(message) ? 12000 : 2000);
+  });
+  const text = lines.join("\n");
+  if (text.length <= budget) return text || "(empty transcript)";
+  const marker = "\n… [middle of older transcript omitted] …\n";
+  if (budget <= marker.length) return text.slice(0, budget);
+  const head = Math.floor((budget - marker.length) * 0.4);
+  return text.slice(0, head) + marker + text.slice(-(budget - marker.length - head));
 }
 
 const SUMMARIZER_SYSTEM_PROMPT = [
@@ -201,58 +158,48 @@ const SUMMARIZER_SYSTEM_PROMPT = [
 // Summarizers.
 // ---------------------------------------------------------------------------
 
-export async function summarizeWithLlm(opts, transcript) {
-  const provider = providerConfig(opts.provider || "deepseek");
-  const apiKey = await getProviderApiKey(opts.provider || "deepseek");
-  if (!apiKey) throw new Error(`No ${provider.label} API key found for context compaction.`);
+export function summaryOptions(opts) {
+  const provider = normalizeProvider(opts.compactProvider || opts.provider || "deepseek");
+  const sameProvider = provider === normalizeProvider(opts.provider || "deepseek");
+  const config = providerConfig(provider);
+  const model = opts.compactModel || (sameProvider ? opts.model : null) || config.model;
+  return { provider, model, baseUrl: opts.compactBaseUrl || (sameProvider ? opts.baseUrl : null) || config.baseUrl,
+    contextLimit: opts.compactContextLimit || (sameProvider && model === opts.model ? opts.contextLimit : null) || contextLimitFor(provider, model),
+    maxTokens: Math.min(COMPACT_MAX_OUTPUT_TOKENS, opts.summaryBudget || COMPACT_MAX_OUTPUT_TOKENS),
+    thinking: "disabled", compactionRequest: true, session: opts.session };
+}
 
-  const body = {
-    model: opts.model,
-    messages: [
-      { role: "system", content: SUMMARIZER_SYSTEM_PROMPT },
-      { role: "user", content: transcript }
-    ],
-    stream: false,
-    max_tokens: COMPACT_MAX_OUTPUT_TOKENS
-  };
-  applyThinkingOptions(body, { thinking: "disabled" });
-
-  for (let attempt = 1; ; attempt += 1) {
+export async function summarizeWithLlm(opts, transcript, hooks = {}) {
+  const requestOpts = summaryOptions(opts);
+  const apiKey = hooks.apiKey ?? await getProviderApiKey(requestOpts.provider);
+  if (!apiKey) throw new Error(`No ${providerConfig(requestOpts.provider).label} API key found for context compaction.`);
+  const attempts = Math.min(Math.max(Number(opts.compactRetryAttempts) || 2, 1), 3);
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.compactTimeoutMs || COMPACT_TIMEOUT_MS);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), COMPACT_TIMEOUT_MS);
-      let response;
-      try {
-        response = await fetch(`${String(opts.baseUrl || provider.baseUrl).replace(/\/$/, "")}/chat/completions`, {
-          method: "POST",
-          signal: controller.signal,
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!response.ok) throw await deepSeekHttpError(response, provider.label);
-      const data = await response.json();
-      const summary = String(data.choices?.[0]?.message?.content || "").trim();
-      if (!summary) throw new Error("compactor returned an empty summary.");
-      // Strip a markdown code fence if the model wrapped the whole answer.
-      return summary.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+      const result = await completeProvider(requestOpts, [
+        { role: "system", content: SUMMARIZER_SYSTEM_PROMPT },
+        { role: "user", content: transcript }
+      ], { apiKey, signal: controller.signal, fetchImpl: hooks.fetchImpl });
+      const summary = String(result.content || "").replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/, "").trim();
+      if (!summary) throw new Error("Compactor returned an empty summary");
+      return summary;
     } catch (error) {
-      const retryable = isRetryableFetchError(error) && !(error instanceof Error && error.message.includes("empty summary"));
-      if (!retryable) throw error;
-      const delay = retryBackoffMs(Number(opts.retryDelay) || 1000, Number(opts.retryMaxDelay) || 30000, attempt);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, delay));
-    }
+      if (attempt === attempts || !isRetryableFetchError(error)) throw error;
+      clearTimeout(timer);
+      await new Promise((resolve) => setTimeout(resolve, retryBackoffMs(opts.retryDelay || 100, opts.retryMaxDelay || 1000, attempt)));
+    } finally { clearTimeout(timer); }
   }
 }
 
 export function buildDeterministicSummary(session, prefix) {
   const parts = [];
   parts.push("# Context compaction summary (deterministic roll-up)");
+  const prior = (prefix || []).find(isCompactionSummary);
+  if (prior) parts.push("", "## Previous memory", String(prior.content).replace(/<\/?context_compaction[^>]*>/g, "").slice(0, 5000));
+  const firstUser = (prefix || []).find((m) => m.role === "user" && !isCompactionSummary(m));
+  if (firstUser) parts.push("", "## Earlier user request", String(firstUser.content).slice(0, 2000));
   if (session?.goal) {
     parts.push("", "## Mission & goals", `- [${session.goal.status}] ${session.goal.objective}`);
   }
@@ -271,7 +218,7 @@ export function buildDeterministicSummary(session, prefix) {
     parts.push("", "## Last assistant notes (from folded messages)", ...lastAssistants.map((message) => `- ${String(message.content).slice(0, 300)}`));
   }
   const folded = prefixList.filter((message) => message.role !== "system").length;
-  parts.push("", "## Compacted away", `- ${folded} earlier message${folded === 1 ? "" : "s"} were folded into this summary to free context. The full transcript remains in the session file's history before this compaction.`);
+  parts.push("", "## Compacted away", `- ${folded} earlier message${folded === 1 ? "" : "s"} were folded into this summary to free context. The folded prefix is replaced in the saved session; this summary is the retained memory.`);
 
   const importantFacts = prefixList
     .flatMap((message) => {
@@ -294,28 +241,33 @@ export function buildDeterministicSummary(session, prefix) {
 
 export function applyCompaction(messages, { keepStart, summary, meta = {} }) {
   const list = Array.isArray(messages) ? messages : [];
-  const system = list[0]?.role === "system" ? list[0] : null;
+  const instructions = [];
+  for (const message of list) { if (!["system", "developer"].includes(message.role)) break; instructions.push(message); }
   const tail = list.slice(Math.max(Number(keepStart) || 1, 1));
   const at = meta.at || new Date().toISOString();
   const summaryMessage = {
     role: "user",
+    compactionSummary: true,
     content: [
       `<context_compaction at="${at}" method="${meta.method || "auto"}" from_tokens="${meta.usage ?? ""}" to_tokens="${meta.projectedTokens ?? ""}">`,
       String(summary || "").trim(),
       "</context_compaction>"
     ].join("\n")
   };
-  return system ? [system, summaryMessage, ...tail] : [summaryMessage, ...tail];
+  return [...instructions, summaryMessage, ...tail];
 }
 
 export async function compactSession(opts, session, hooks = {}) {
   if (!session || !Array.isArray(session.messages)) return null;
   const method = String(opts.compactMethod || "auto").toLowerCase();
   if (method === "off" || method === "detached") return null; // detached is handled by the wrapper/spawn path
+  if (!["auto", "llm", "truncate"].includes(method)) throw new Error(`Unknown compaction method: ${method}`);
 
   const plan = computeCompactionPlan(session.messages, {
     limit: opts.contextLimit,
-    threshold: opts.compactForce ? 0.01 : opts.compactAt,
+    threshold: opts.compactAt,
+    force: opts.compactForce,
+    toolTokens: opts.compactToolTokens,
     keepRecent: opts.compactKeepRecent,
     completionTokens: opts.maxTokens
   });
@@ -328,22 +280,23 @@ export async function compactSession(opts, session, hooks = {}) {
   let usedMethod;
   if (method === "llm" || method === "auto") {
     try {
-      const transcript = truncateTranscriptForSummary(plan.prefix);
-      summary = await summarizeWithLlm(opts, transcript);
+      const summaryOpts = summaryOptions({ ...opts, summaryBudget: plan.summaryBudget });
+      const inputBudget = Math.max(128, Math.floor((summaryOpts.contextLimit - summaryOpts.maxTokens) / TOKEN_ESTIMATE_SAFETY) - estimateTokens(SUMMARIZER_SYSTEM_PROMPT) - 128);
+      const transcript = truncateTranscriptForSummary(plan.prefix, Math.min(DEFAULT_SUMMARY_INPUT_TOKENS, inputBudget));
+      summary = await summarizeWithLlm({ ...opts, summaryBudget: plan.summaryBudget }, transcript, hooks);
+      if (estimateTokens(summary) > plan.summaryBudget) throw new Error("Summary exceeded its reserved budget");
       usedMethod = "llm";
     } catch (error) {
-      if (method === "auto") {
-        summary = buildDeterministicSummary(session, plan.prefix);
-        usedMethod = `truncate_fallback (${error.message.slice(0, 120)})`;
-      } else {
-        throw error;
-      }
+      summary = buildDeterministicSummary(session, plan.prefix);
+      usedMethod = "truncate_fallback";
+      hooks.onFallback?.(error);
     }
   } else {
     summary = buildDeterministicSummary(session, plan.prefix);
     usedMethod = "truncate";
   }
 
+  summary = String(summary).slice(0, plan.summaryBudget * 4);
   const meta = {
     at,
     method: usedMethod,
@@ -356,9 +309,18 @@ export async function compactSession(opts, session, hooks = {}) {
     projectedTokens: plan.projectedTokens,
     foldedMessages: plan.prefix.filter((message) => message.role !== "system").length,
     keptMessages: plan.tail.length,
+    keptTurns: plan.keptTurns,
+    foldedTurns: plan.foldedTurns,
+    activeTurn: plan.activeTurn,
+    summaryProvider: summaryOptions(opts).provider,
+    summaryModel: summaryOptions(opts).model,
     keptStartIndex: plan.keepStart
   };
-  session.messages = applyCompaction(session.messages, { keepStart: plan.keepStart, summary, meta });
+  const nextMessages = applyCompaction(session.messages, { keepStart: plan.keepStart, summary, meta });
+  meta.projectedTokens = Math.ceil((estimateContextTokens(nextMessages) + plan.toolTokens) * TOKEN_ESTIMATE_SAFETY);
+  if (meta.projectedTokens > plan.messagesBudget) throw new Error("Compacted context still exceeds the input budget; session was not changed");
+  conversationTurns(nextMessages); // Validate the retained call/result structure before committing.
+  session.messages = nextMessages;
   if (!Array.isArray(session.compactions)) session.compactions = [];
   session.compactions.push(meta);
   session.updatedAt = at;
@@ -378,7 +340,9 @@ export async function compactSessionDetached(opts, session) {
   const plan = computeCompactionPlan(session.messages, {
     limit: opts.contextLimit,
     threshold: opts.compactAt,
-    keepRecent: opts.compactKeepRecent
+    keepRecent: opts.compactKeepRecent,
+    completionTokens: opts.maxTokens,
+    toolTokens: opts.compactToolTokens
   });
   if (!plan.needed) return null;
 
@@ -395,12 +359,19 @@ export async function compactSessionDetached(opts, session) {
         "--at", String(opts.compactAt),
         "--limit", String(opts.contextLimit),
         "--keep-recent", String(opts.compactKeepRecent),
-        "--method", "llm",
+        "--method", "auto",
+        "--provider", opts.provider,
+        "--model", opts.model,
+        "--base-url", opts.baseUrl,
+        "--tool-tokens", String(opts.compactToolTokens || 0),
+        ...(opts.compactProvider ? ["--compact-provider", opts.compactProvider] : []),
+        ...(opts.compactModel ? ["--compact-model", opts.compactModel] : []),
+        ...(opts.compactBaseUrl ? ["--compact-base-url", opts.compactBaseUrl] : []),
         "--completion", String(opts.maxTokens)
       ], { windowsHide: true });
       let stderr = "";
       child.stderr.on("data", (chunk) => { stderr += chunk; });
-      const timer = setTimeout(() => child.kill(), COMPACT_TIMEOUT_MS + 30_000);
+      const timer = setTimeout(() => child.kill(), COMPACT_TIMEOUT_MS * 2 + 10_000);
       child.on("error", reject);
       child.on("exit", (code) => {
         clearTimeout(timer);
