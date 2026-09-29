@@ -14,6 +14,7 @@ const sessionFile = join(tempRoot, "worker-session.json");
 const outputFile = join(tempRoot, "result.md");
 let coordinator;
 let child;
+let stderr = "";
 let requestCount = 0;
 let secondRequestMessages = [];
 let thirdRequestMessages = [];
@@ -28,6 +29,11 @@ const server = createServer(async (request, response) => {
   let body = "";
   for await (const chunk of request) body += chunk;
   const parsed = JSON.parse(body || "{}");
+  if (request.method !== "POST" || request.url?.endsWith("/user/balance")) {
+    response.writeHead(404, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "endpoint unavailable in this mock" }));
+    return;
+  }
   requestCount += 1;
   if (requestCount === 1) {
     sse(response, [{
@@ -63,6 +69,18 @@ async function waitUntil(predicate, timeoutMs, label) {
   throw new Error(`Timed out waiting for ${label}.`);
 }
 
+async function removeTempRootWithRetry() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(tempRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!['EBUSY', 'EPERM'].includes(error.code) || attempt === 9) throw error;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+  }
+}
+
 try {
   await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
   const address = server.address();
@@ -93,7 +111,6 @@ try {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { stderr += chunk; });
 
@@ -161,6 +178,6 @@ try {
     catch (error) { cleanupError = error; }
   }
   await new Promise((resolvePromise) => server.close(resolvePromise));
-  await rm(tempRoot, { recursive: true, force: true });
+  await removeTempRootWithRetry();
   if (cleanupError) throw cleanupError;
 }
