@@ -27,6 +27,7 @@
 - **Provider adapters** — DeepSeek/GLM chat completions, Claude Messages, and GPT Responses; use `--provider deepseek|glm|anthropic|openai`. `claude` and `gpt` are accepted aliases.
 - **Automatic prompt caching** — Claude automatic cache control, implicit caching on the other providers, and normalized input/cache-read/cache-write/output usage.
 - **Automatic context compaction** — provider/model budgets, a replaced prefix summary, 15 complete tool-safe turns, and bounded deterministic fallback.
+- **MCP servers** — connect local stdio and remote Streamable HTTP Model Context Protocol servers to API-backed sessions; calls follow Switchyard permission prompts.
 
 ### Model picker pricing
 
@@ -186,6 +187,36 @@ the context budget is recalculated. Switching API provider sends the saved
 conversation to that provider. Resume offers a saved-model option, a new model,
 and (for API sessions) a new API provider.
 
+### MCP servers
+
+Choose **MCP servers** from the startup TUI, or use `switchyard mcp add` to
+configure a local stdio process or remote Streamable HTTP endpoint. Check
+connections with `switchyard mcp test <name>`, list them with `switchyard mcp
+list`, and remove them with `switchyard mcp remove <name>`. Servers connect in
+API-backed runs; native Codex and Claude CLI sessions keep their own tool
+systems.
+
+Within an API session, the agent can use `mcp_server_list`, `mcp_server_add`,
+and `mcp_server_remove`. Successful setup updates the live tool list on the
+next model request, so the new server is usable without restarting the session.
+The `dsw-mcp-setup` skill guides agents through this flow.
+
+Credentials are referenced from the environment in the user config, never
+stored there as literal secrets. For example:
+
+```json
+{
+  "type": "http",
+  "url": "https://example.com/mcp",
+  "headers": { "Authorization": "${env:EXAMPLE_MCP_TOKEN}" }
+}
+```
+
+In `ask` permission, Switchyard prompts before every MCP call. In `review`, it
+offers only tools whose server metadata says `readOnlyHint: true`; this is a
+server-provided hint and not a security boundary. Use `full` only with servers
+you trust. Tool names shown to the model are namespaced as `mcp_<server>_<tool>`.
+
 Codex sessions can change Codex models; Claude Code sessions can change Claude
 models. Their native conversation IDs and tool histories are engine-specific:
 crossing between native engines, or between native and API, requires a new
@@ -228,9 +259,13 @@ API-key billing remains available through `--backend api --provider openai` or
   Enter queues a follow-up. Native sessions open straight into the input box.
 - `/model` opens the connection model picker; `/model <name>` changes it for later turns.
   Without `--model`, each CLI chooses its configured default.
-- Codex allowance and reset times appear in the status row; `/usage` refreshes
-  them. Claude reports rate-limit events but this integration does not fetch a
-  remaining subscription quota or dollar balance.
+- Provider budget state appears in the status row and is sent to the active
+  model with safe stopping guidance. Codex supplies subscription windows and
+  reset times; `/usage` refreshes them. DeepSeek API sessions refresh the
+  official dollar balance at most once per minute. Claude subscription sessions
+  use rate-limit events emitted by Claude Code. GLM, Claude API, and OpenAI API
+  sessions show an explicit unknown state because those adapters do not expose a
+  supported account balance endpoint. Switchyard never guesses missing credit.
 - Switchyard saves a transcript plus the native conversation ID. `switchyard
   --resume` restores the matching backend; keep the native CLI's session files.
   API sessions and native sessions cannot be converted by switching backends.
@@ -328,8 +363,10 @@ In terminals that support OSC-8 hyperlinks, the TUI turns exact workspace file p
 | `list_workspace_files` | List files/dirs — now supports `recursive`, `glob`, `exclude_glob`, `include_metadata`, pagination |
 | `read_text_file` | Read a file by line range or byte offset; `structured: true` returns cursor JSON |
 | `read_text_files` | Batch-read multiple files in one call; per-file errors don't abort the batch |
-| `view_image` | Read a workspace image and return metadata, dimensions, and a data URL when small enough; does not visually interpret content |
-| `analyze_image_openai` | Use OpenAI vision to inspect/transcribe a workspace image; requires `OPENAI_API_KEY` |
+| `view_image` | Attach a workspace image as native image content for a vision-capable active model |
+| `analyze_image_openai` | Textual OpenAI vision fallback, offered when the active model cannot receive images |
+| `generate_image` | Generate/edit through OpenAI's image-generation tool and attach the result to a capable GPT session |
+| `generate_image_openai` | OpenAI generation fallback for providers without native image output; saves the result in the workspace |
 | `search_code` | Regex/literal search across workspace files with glob filter and context lines |
 | `artifact_list` / `artifact_read_range` / `artifact_search` | Bounded retrieval from task-scoped analysis artifacts |
 | `artifact_index` / `artifact_search_all` | Task-wide artifact metadata and bounded cross-artifact search |
@@ -567,11 +604,31 @@ Future resumes of that session reuse the saved skills automatically unless you p
 
 ### Image understanding
 
-`view_image` only exposes image metadata and a data URL. For real visual understanding, set an OpenAI key and let DeepSeek call `analyze_image_openai`:
+Image tools are selected from the active provider and model. Vision-capable GPT,
+Claude, DeepSeek Vision, and GLM vision models receive `view_image`; its result is
+translated to a GPT `input_image`, Claude base64 image block, or the compatible
+chat image shape. Text-only models do not see that tool and receive
+`analyze_image_openai` instead. That fallback makes a separate OpenAI vision
+request and returns text, so it requires an OpenAI API key.
+
+Image output follows the same rule. Supported GPT sessions receive
+`generate_image`; other providers receive `generate_image_openai`. Both use the
+OpenAI Responses image-generation tool, save the PNG at the requested workspace
+path, and require write permission. Claude can inspect images directly but its
+Messages API does not currently supply Switchyard with an image-output tool.
+Native `--backend codex` and `--backend claude` sessions continue to use their
+CLI's own tool set; this capability gating applies to Switchyard's API backend.
+
+```powershell
+switchyard --provider openai -p "Inspect screenshot.png, then explain the UI problem" --permission review
+switchyard --provider deepseek -p "Generate a logo at out/logo.png" --permission ask
+```
+
+For the text-only fallback, configure an OpenAI key:
 
 ```powershell
 $env:OPENAI_API_KEY = "sk-..."
-d -p "read the code in screenshot.png" --permission review
+switchyard --provider deepseek -p "read the code in screenshot.png" --permission review
 ```
 
 To persist the OpenAI key for future terminals on Windows:

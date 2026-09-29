@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { normalizeProvider, providerConfig } from "./providers.js";
 import { applyThinkingOptions } from "./deepseek-request.js";
 import { deepSeekHttpError } from "./api-error.js";
+import { isMultimodalResult, modelCapabilities, multimodalText } from './multimodal.js';
 
 export function providerHeaders(provider, apiKey) {
   return {
@@ -13,10 +14,15 @@ export function providerHeaders(provider, apiKey) {
 }
 
 function contentText(content) {
+  if (isMultimodalResult(content)) return multimodalText(content);
   if (typeof content === "string") return content;
   if (content == null) return "";
   if (Array.isArray(content)) return content.map((part) => part.text || JSON.stringify(part)).join("\n");
   return JSON.stringify(content);
+}
+
+function dataUrl(image) {
+  return `data:${image.mimeType};base64,${image.data}`;
 }
 
 function nativeState(message, opts) {
@@ -31,7 +37,14 @@ function anthropicMessages(messages, opts) {
     const role = message.role === "assistant" ? "assistant" : "user";
     let content;
     if (message.role === "tool") {
-      content = [{ type: "tool_result", tool_use_id: message.tool_call_id, content: contentText(message.content) }];
+      const result = message.content;
+      const resultContent = isMultimodalResult(result)
+        ? [
+            ...(result.text ? [{ type: 'text', text: result.text }] : []),
+            ...result.images.filter(image => image.data).map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } }))
+          ]
+        : contentText(result);
+      content = [{ type: "tool_result", tool_use_id: message.tool_call_id, content: resultContent }];
     } else if (nativeState(message, opts)?.content) {
       content = nativeState(message, opts).content;
     } else {
@@ -50,6 +63,11 @@ function anthropicMessages(messages, opts) {
 
 function responseInput(messages, opts) {
   const input = [];
+  const pendingImages = [];
+  const flushImages = () => {
+    if (!pendingImages.length) return;
+    input.push({ role: 'user', content: pendingImages.splice(0) });
+  };
   for (const message of messages) {
     const native = nativeState(message, opts);
     if (message.role === "assistant" && native?.output) {
@@ -58,15 +76,48 @@ function responseInput(messages, opts) {
     }
     if (message.role === "tool") {
       input.push({ type: "function_call_output", call_id: message.tool_call_id, output: contentText(message.content) });
+      if (isMultimodalResult(message.content) && message.content.images.some(image => image.data)) {
+        pendingImages.push(
+          { type: 'input_text', text: message.content.text || 'Image returned by the preceding tool call.' },
+          ...message.content.images.filter(image => image.data).map(image => ({ type: 'input_image', image_url: dataUrl(image), detail: 'auto' }))
+        );
+      }
       continue;
     }
+    flushImages();
     const text = contentText(message.content);
     if (text) input.push({ role: message.role === "system" ? "developer" : message.role, content: text });
     for (const call of message.tool_calls || []) {
       input.push({ type: "function_call", call_id: call.id, name: call.function.name, arguments: call.function.arguments || "{}" });
     }
   }
+  flushImages();
   return input;
+}
+
+function compatibleChatMessages(messages, provider, model) {
+  const output = [];
+  const pendingImages = [];
+  const flushImages = () => {
+    if (!pendingImages.length) return;
+    output.push({ role: 'user', content: pendingImages.splice(0) });
+  };
+  for (const message of messages) {
+    if (message.role !== 'tool') flushImages();
+    const media = isMultimodalResult(message.content);
+    output.push({ role: message.role, content: media ? message.content.text : message.content ?? '',
+      ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+      ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}),
+      ...(message.reasoning_content && provider === 'deepseek' ? { reasoning_content: message.reasoning_content } : {}) });
+    if (media && message.content.images.some(image => image.data) && modelCapabilities(provider, model).vision) {
+      pendingImages.push(
+        { type: 'text', text: message.content.text || 'Image returned by the preceding tool call.' },
+        ...message.content.images.filter(image => image.data).map(image => ({ type: 'image_url', image_url: { url: dataUrl(image) } }))
+      );
+    }
+  }
+  flushImages();
+  return output;
 }
 
 export function buildProviderRequest(opts, messages, { apiKey, stream = false, tools = [] } = {}) {
@@ -100,10 +151,7 @@ export function buildProviderRequest(opts, messages, { apiKey, stream = false, t
   } else {
     endpoint = "chat/completions";
     body = { model, stream, max_tokens: opts.maxTokens || 16384,
-      messages: messages.map((m) => ({ role: m.role, content: m.content ?? "",
-        ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-        ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
-        ...(m.reasoning_content && provider === "deepseek" ? { reasoning_content: m.reasoning_content } : {}) })) };
+      messages: compatibleChatMessages(messages, provider, model) };
     applyThinkingOptions(body, opts);
     if (stream) body.stream_options = { include_usage: true };
     if (tools.length) body.tools = tools;

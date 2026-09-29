@@ -12,6 +12,7 @@ import { configPath, getDeepSeekApiKey, getProviderApiKey, setProviderApiKey } f
 import { contextLimitFor, fetchProviderModels, hasKnownContextLimit, normalizeProvider, PROVIDERS, providerConfig } from "./providers.js";
 import { providerStream } from "./provider-transport.js";
 import { DEEPSEEK_TOP_UP_URL, getProviderBalance, isBelowMinimum } from "./provider-balance.js";
+import { deepSeekBudget, formatBudget, unavailableBudget, upsertBudgetContext } from './provider-budget.js';
 import { listSessions, newSession, newSessionPath, readSession, sessionPath, touchSession, writeSession } from "./session-memory.js";
 import { certLogs, classifyUrl, dnsLookup, fileAnalyze, trackSafetyState, verifyDownload, virusTotalLookup, watchDownloads, whoisLookup } from "./download-safety.js";
 import { runSecurityTool, securityToolSchemas } from "./security_tools.js";
@@ -27,6 +28,8 @@ import { TerminalUI } from "./terminal-ui.js";
 import { runNativeChat } from "./native-chat.js";
 import { nativeAuth } from "./native-process.js";
 import { CONNECTIONS, chooseModel, applyApiModel, SLASH_HELP, parseSlash } from "./connection-picker.js";
+import { consumeMultimodalResults, isMultimodalResult, modelCapabilities, multimodalResult, supportsNativeImageMime } from './multimodal.js';
+import { createMcpManager, getMcpServers, inspectMcpServer, removeMcpServer, saveMcpServer } from "./mcp.js";
 let activeTerminalUi = null;
 import { renderChatHistory, historyTitle } from "./history.js";
 import { compactSession, compactSessionDetached, estimateContextTokens, estimateMessageTokens, estimateTokens } from "./context-compactor.js";
@@ -74,6 +77,7 @@ Usage:
   switchyard --backend codex --tui
   switchyard --backend claude --tui
   switchyard balance [--minimum <usd>] [--json]
+  switchyard mcp list|add|remove|test [name]
   switchyard agents [--all] [--json] [-i|--interactive] [--coord-dir <dir>]
   switchyard message <agent-id> <message> [--from <agent-id>] [--coord-dir <dir>]
   switchyard wake <agent-id> [message] [--from <agent-id>] [--coord-dir <dir>]
@@ -376,10 +380,11 @@ function gitBranch() {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-async function runtimeContext() {
+async function runtimeContext(opts = {}) {
   const branch = gitBranch();
   const openAiConfigured = Boolean(await getProviderApiKey("openai"));
   const openAiModel = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
+  const capabilities = opts.provider && opts.model ? modelCapabilities(opts.provider, opts.model) : null;
   const searchProviders = configuredSearchProviders();
   return [
     `date: ${new Date().toISOString()}`,
@@ -388,6 +393,13 @@ async function runtimeContext() {
     `workspace: ${process.cwd()}`,
     `shell: ${process.env.ComSpec || process.env.SHELL || "unknown"}`,
     `node: ${process.version}`,
+    ...(capabilities ? [
+      `active_provider: ${opts.provider}`,
+      `active_model: ${opts.model}`,
+      `provider_budget: ${formatBudget(opts.providerBudget || unavailableBudget(opts.provider))}`,
+      `image_input: ${capabilities.vision ? 'native_attachment' : openAiConfigured ? 'openai_text_fallback' : 'unavailable'}`,
+      `image_generation: ${capabilities.imageGeneration ? 'native_openai_tool' : openAiConfigured ? 'openai_fallback' : 'unavailable'}`
+    ] : []),
     `openai_vision: ${openAiConfigured ? "configured" : "not_configured"}`,
     `openai_vision_model: ${openAiModel}`,
     "openai_api_key_setup: https://platform.openai.com/api-keys",
@@ -396,6 +408,21 @@ async function runtimeContext() {
     "google_search_setup: https://programmablesearchengine.google.com/controlpanel/all",
     branch ? `git_branch: ${branch}` : "git_branch: none"
   ].join("\n");
+}
+
+async function refreshApiBudget(opts, { force = false } = {}) {
+  if (!force && opts.providerBudget?.provider === normalizeProvider(opts.provider) && opts.providerBudget?.checkedAt && Date.now() - Date.parse(opts.providerBudget.checkedAt) < 60_000) return opts.providerBudget;
+  if (normalizeProvider(opts.provider) !== 'deepseek') {
+    opts.providerBudget = unavailableBudget(opts.provider, 'provider_does_not_expose_supported_balance_endpoint');
+    return opts.providerBudget;
+  }
+  try {
+    const apiKey = await getProviderApiKey('deepseek');
+    opts.providerBudget = deepSeekBudget(await getProviderBalance('deepseek', { apiKey, baseUrl: opts.baseUrl }));
+  } catch (error) {
+    opts.providerBudget = { ...unavailableBudget('deepseek', 'balance_check_failed'), error: error.message };
+  }
+  return opts.providerBudget;
 }
 
 function agentIdentityContext(opts) {
@@ -418,7 +445,7 @@ function agentIdentityContext(opts) {
 }
 
 async function loadSystemPrompt(opts) {
-  if (opts.system) return `${opts.system.replace("{{context}}", await runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
+  if (opts.system) return `${opts.system.replace("{{context}}", await runtimeContext(opts))}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
   let template;
   if (opts.systemFile) {
     template = await readFile(resolve(opts.systemFile), "utf8");
@@ -427,7 +454,7 @@ async function loadSystemPrompt(opts) {
   } else {
     template = await readFile(DEFAULT_SYSTEM_PROMPT_FILE, "utf8");
   }
-  return `${template.replace("{{context}}", await runtimeContext())}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
+  return `${template.replace("{{context}}", await runtimeContext(opts))}${agentIdentityContext(opts)}${await renderLoadedSkills(opts)}`;
 }
 
 function color(opts, code, text) {
@@ -916,6 +943,7 @@ function readTextFileDisplay(args, result) {
 
 function toolDisplayResult(name, args, result) {
   if (name === "read_text_file") return readTextFileDisplay(args, result);
+  if (isMultimodalResult(result)) return result.text;
   return result;
 }
 
@@ -1389,14 +1417,14 @@ function imageDimensions(buffer, mime) {
   return null;
 }
 
-async function viewImage(args) {
+async function viewImage(opts, args) {
   const target = assertInsideWorkspace(args.path);
   const info = await stat(target);
   if (!info.isFile()) throw new Error("Path is not a file.");
   const mime = imageMime(args.path);
   if (!mime.startsWith("image/")) throw new Error(`Unsupported image extension: ${extname(args.path) || "(none)"}`);
+  if (!supportsNativeImageMime(mime)) throw new Error(`${mime} cannot be attached to ${opts.provider}. Convert it to PNG, JPEG, GIF, or WebP first.`);
   const maxBytes = Math.min(Math.max(Number(args.max_bytes) || 4000000, 1), 12000000);
-  const includeData = args.include_data_url !== false;
   const buffer = await readFile(target);
   const dimensions = imageDimensions(buffer, mime);
   const result = {
@@ -1404,16 +1432,11 @@ async function viewImage(args) {
     mime,
     size_bytes: info.size,
     dimensions,
-    vision_available: false,
-    note: "This tool does not visually interpret image content. Use analyze_image_openai for real image understanding when OPENAI_API_KEY is configured.",
-    data_url_included: includeData && buffer.length <= maxBytes
+    vision_available: true,
+    note: "The image is attached to the next provider request as native image content."
   };
-  if (includeData && buffer.length <= maxBytes) {
-    result.data_url = `data:${mime};base64,${buffer.toString("base64")}`;
-  } else if (includeData) {
-    result.data_url_note = `Image is ${buffer.length} bytes, above max_bytes=${maxBytes}; raise max_bytes or set include_data_url=false for metadata only.`;
-  }
-  return JSON.stringify(result, null, 2);
+  if (buffer.length > maxBytes) throw new Error(`Image is ${buffer.length} bytes, above max_bytes=${maxBytes}. Crop/compress it or raise max_bytes.`);
+  return multimodalResult({ text: JSON.stringify(result, null, 2), images: [{ data: buffer.toString('base64'), mimeType: mime, path: args.path }] });
 }
 
 function extractOpenAiOutputText(data) {
@@ -1479,6 +1502,59 @@ async function analyzeImageOpenAI(args) {
   return output;
 }
 
+async function generateImageOpenAI(opts, args) {
+  if (opts.permission === 'review') throw new Error('Image generation is blocked by session permission: review only.');
+  const apiKey = await getProviderApiKey('openai');
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not set. Configure an OpenAI API key before using image generation.');
+  const prompt = String(args.prompt || '').trim();
+  if (!prompt) throw new Error('prompt is required.');
+  const outputPath = String(args.output_path || '').trim();
+  if (!outputPath) throw new Error('output_path is required.');
+  const output = assertInsideWorkspace(outputPath);
+  const imageModel = String(args.image_model || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare').trim();
+  const hostModel = String(args.host_model || process.env.OPENAI_IMAGE_HOST_MODEL || (opts.provider === 'openai' ? opts.model : 'gpt-5')).trim();
+  if (opts.permission !== 'full' && !opts.dangerouslyAutoRunCommands) {
+    if (opts.noOutput) throw new Error('Image generation is blocked by no-output mode.');
+    const approved = await askYesNo(`Generate an image through the billed OpenAI API and write ${outputPath}?`);
+    if (!approved) return 'blocked by user';
+  }
+  const content = [{ type: 'input_text', text: prompt }];
+  for (const inputPath of args.input_paths || []) {
+    const source = assertInsideWorkspace(inputPath);
+    const mime = imageMime(inputPath);
+    if (!mime.startsWith('image/')) throw new Error(`Unsupported input image extension: ${inputPath}`);
+    const bytes = await readFile(source);
+    if (bytes.length > 20_000_000) throw new Error(`Input image is larger than 20 MB: ${inputPath}`);
+    content.push({ type: 'input_image', image_url: `data:${mime};base64,${bytes.toString('base64')}` });
+  }
+  const response = await fetchWithTimeout('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: hostModel,
+      input: [{ role: 'user', content }],
+      tools: [{ type: 'image_generation', model: imageModel }],
+      tool_choice: { type: 'image_generation' }
+    })
+  }, Math.min(Number(args.timeout_ms) || 180000, 300000));
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`OpenAI image generation failed: HTTP ${response.status}${text ? ` ${compactText(text, 800)}` : ''}`);
+  }
+  const data = await response.json();
+  const call = (data.output || []).find(item => item.type === 'image_generation_call' && item.result);
+  if (!call) throw new Error(`OpenAI returned no image_generation_call result (status ${data.status || 'unknown'}).`);
+  const bytes = Buffer.from(call.result, 'base64');
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, bytes);
+  opts.touchedFiles?.add(outputPath);
+  return multimodalResult({
+    text: JSON.stringify({ path: outputPath, mime: 'image/png', size_bytes: bytes.length, host_model: hostModel, image_model: imageModel }, null, 2),
+    images: [{ data: call.result, mimeType: 'image/png', path: outputPath }],
+    files: [outputPath]
+  });
+}
+
 function compactText(value, max = 900) {
   const text = String(value || "").replace(/\r\n/g, "\n").trim();
   if (text.length <= max) return text;
@@ -1516,6 +1592,7 @@ async function pickDashboardAction(opts) {
     { id: "new", label: "New run" },
     { id: "resume", label: "Resume session" },
     { id: "agents", label: "Agents - send messages, wake parked" },
+    { id: "mcp", label: "MCP servers - configure external tools" },
     { id: "config", label: "Show config path" },
     { id: "help", label: "Show help" },
     { id: "quit", label: "Quit" }
@@ -1572,6 +1649,7 @@ async function dashboardOpts() {
         opts.startupUi?.close(); opts.startupUi = null;
         await runCoordinationCommand("agents", ["--interactive"]); open(); continue;
       }
+      if (action === "mcp") { await manageMcpServers(ask, choose, notice); continue; }
       if (action === "resume") {
         opts.resume = true;
         let picked;
@@ -1740,13 +1818,12 @@ function toolSchemas(opts) {
       type: "function",
       function: {
         name: "view_image",
-        description: "Read a workspace image file and return JSON metadata, dimensions when detectable, and a base64 data URL when small enough. Does not visually interpret content. Read-only.",
+        description: "Attach a workspace image to this model as native image content, matching the provider's expected multimodal shape. Use it to inspect screenshots, diagrams, photos, or image text directly. Available only to vision-capable models. Read-only.",
         parameters: {
           type: "object",
           properties: {
             path: { type: "string", description: "Workspace-relative image path." },
-            include_data_url: { type: "boolean", description: "Include a data:image/... base64 URL. Default true." },
-            max_bytes: { type: "number", description: "Maximum image bytes to include in data_url. Default 4000000, max 12000000." }
+            max_bytes: { type: "number", description: "Maximum image bytes to attach. Default 4000000, max 12000000." }
           },
           required: ["path"],
           additionalProperties: false
@@ -1757,7 +1834,7 @@ function toolSchemas(opts) {
       type: "function",
       function: {
         name: "analyze_image_openai",
-        description: "Use OpenAI vision to visually inspect a workspace image and return text analysis or exact transcription. Requires OPENAI_API_KEY. Read-only.",
+        description: "Fallback for a model that cannot receive images: ask an OpenAI vision-capable model to inspect a workspace image and return its textual analysis. Requires OPENAI_API_KEY. Read-only.",
         parameters: {
           type: "object",
           properties: {
@@ -1769,6 +1846,46 @@ function toolSchemas(opts) {
             timeout_ms: { type: "number", description: "OpenAI request timeout. Default 60000, max 180000." }
           },
           required: ["path"],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_image",
+        description: "Generate or edit an image with OpenAI's Responses image-generation tool, save it in the workspace, and attach the result to this vision-capable GPT session. Requires OPENAI_API_KEY and write permission.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Detailed generation or editing instructions." },
+            output_path: { type: "string", description: "Workspace-relative .png output path." },
+            input_paths: { type: "array", items: { type: "string" }, description: "Optional workspace image paths to edit or use as references." },
+            image_model: { type: "string", description: "Image model. Defaults to OPENAI_IMAGE_MODEL or gpt-image-2.5-flare." },
+            host_model: { type: "string", description: "Vision-capable mainline Responses model. Defaults to the active GPT model." },
+            timeout_ms: { type: "number", description: "Deadline in milliseconds. Default 180000, max 300000." }
+          },
+          required: ["prompt", "output_path"],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_image_openai",
+        description: "Fallback image generator for providers without image output: call OpenAI's Responses image-generation tool and save the result in the workspace. The current model receives the saved path and metadata. Requires OPENAI_API_KEY and write permission.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: { type: "string", description: "Detailed generation or editing instructions." },
+            output_path: { type: "string", description: "Workspace-relative .png output path." },
+            input_paths: { type: "array", items: { type: "string" }, description: "Optional workspace image paths to edit or use as references." },
+            image_model: { type: "string", description: "Image model. Defaults to OPENAI_IMAGE_MODEL or gpt-image-2.5-flare." },
+            host_model: { type: "string", description: "OpenAI mainline model hosting the image-generation tool. Defaults to OPENAI_IMAGE_HOST_MODEL or gpt-5." },
+            timeout_ms: { type: "number", description: "Deadline in milliseconds. Default 180000, max 300000." }
+          },
+          required: ["prompt", "output_path"],
           additionalProperties: false
         }
       }
@@ -3026,10 +3143,73 @@ function toolSchemas(opts) {
       }
     }
   );
-  if (opts.permission === "review") {
-    return schemas.filter((schema, index) => index < reviewSchemaCount || schema.function?.name?.startsWith("agent_"));
+  const caps = modelCapabilities(opts.provider, opts.model);
+  let available = opts.permission === "review"
+    ? schemas.filter((schema, index) => index < reviewSchemaCount || schema.function?.name?.startsWith("agent_"))
+    : schemas;
+  available = available.filter(({ function: tool }) => {
+    if (tool.name === 'view_image') return caps.vision;
+    if (tool.name === 'analyze_image_openai') return !caps.vision;
+    if (tool.name === 'generate_image') return caps.imageGeneration && opts.permission !== 'review';
+    if (tool.name === 'generate_image_openai') return !caps.imageGeneration && opts.permission !== 'review';
+    return true;
+  });
+  if (opts.mcpManager) available.push(...opts.mcpManager.schemas(), ...opts.mcpManager.managementSchemas());
+  return available;
+}
+
+async function manageMcpServers(ask = promptLine, choose = null, notice = message => process.stdout.write(`${message}\n`)) {
+  const servers = await getMcpServers();
+  const actions = [
+    { id: "list", label: "List configured servers" },
+    { id: "add", label: "Add a server" },
+    { id: "test", label: "Test a server" },
+    { id: "remove", label: "Remove a server" },
+    { id: "back", label: "Back" }
+  ];
+  const action = choose ? await choose("MCP servers", "Switchyard connects these servers for API-backed sessions.", actions) : await pickMenu(parseArgs([]), "MCP servers", "Configure external tools.", actions);
+  if (!action || action === "back") return;
+  if (action === "list") {
+    const entries = Object.entries(servers);
+    notice(entries.length ? entries.map(([name, value]) => `${name} · ${value.type}${value.enabled === false ? " · disabled" : ""}`).join("\n") : "No MCP servers configured.");
+    if (choose) await ask("Press Enter to return");
+    return;
   }
-  return schemas;
+  if (action === "add") {
+    const name = (await ask("Server name (letters, numbers, _ or -)")).trim();
+    const type = choose ? await choose("Connection type", "Choose how Switchyard connects.", [{ id: "stdio", label: "Local process (stdio)" }, { id: "http", label: "Remote HTTP (Streamable HTTP)" }, { id: "back", label: "Cancel" }]) : (await ask("Connection type (stdio/http)")).trim().toLowerCase();
+    if (!name || !["stdio", "http"].includes(type)) return;
+    let server;
+    if (type === "stdio") {
+      const command = (await ask("Command to start the MCP server (example: npx)")).trim();
+      const rawArgs = (await ask("Arguments as a JSON array (or blank)")).trim();
+      const rawEnv = (await ask("Environment variables as JSON; use \"${env:NAME}\" references for secrets (or blank)")).trim();
+      let args = [], env = {};
+      try { args = rawArgs ? JSON.parse(rawArgs) : []; env = rawEnv ? JSON.parse(rawEnv) : {}; } catch { notice("Arguments/environment must be valid JSON."); return; }
+      const cwd = (await ask("Working directory (blank uses current directory)")).trim();
+      server = { type, command, args, env, ...(cwd ? { cwd } : {}) };
+    } else {
+      const url = (await ask("Server URL (https://...)")).trim();
+      const rawHeaders = (await ask("HTTP headers as JSON; use \"${env:NAME}\" references for secrets (or blank)")).trim();
+      let headers = {};
+      try { headers = rawHeaders ? JSON.parse(rawHeaders) : {}; } catch { notice("Headers must be valid JSON."); return; }
+      server = { type, url, headers };
+    }
+    await saveMcpServer(name, server);
+    notice(`Saved MCP server ${name}. It will connect on your next API session.`);
+    return;
+  }
+  const name = (await ask(`Server name (${Object.keys(servers).join(", ") || "none configured"})`)).trim();
+  if (!name) return;
+  if (action === "remove") {
+    if (await removeMcpServer(name)) notice(`Removed MCP server ${name}.`); else notice(`No MCP server named ${name}.`);
+  } else if (action === "test") {
+    try {
+      const tools = await inspectMcpServer(name);
+      notice(`${name} connected. Tools: ${tools.map(tool => tool.name).join(", ") || "(none)"}`);
+    } catch (error) { notice(`${name}: ${error.message}`); }
+  }
+  if (choose) await ask("Press Enter to return");
 }
 
 async function atomicWriteFile(absPath, content) {
@@ -3685,10 +3865,11 @@ async function doctor() {
     `  API key: ${deepSeekKey ? maskedSecretStatus(deepSeekKey) : "not set"}`,
     `  Setup: switchyard config set-key <deepseek-key>`,
     "",
-    "OpenAI vision",
+    "OpenAI multimodal fallback",
     `  OPENAI_API_KEY: ${maskedSecretStatus(openAiKey)}`,
     `  OPENAI_VISION_MODEL: ${process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini (default)"}`,
-    `  Tool: analyze_image_openai ${openAiKey ? "available" : "blocked until OPENAI_API_KEY is set"}`,
+    `  Vision fallback: analyze_image_openai ${openAiKey ? "available" : "blocked until OPENAI_API_KEY is set"}`,
+    `  Generation fallback: generate_image_openai ${openAiKey ? "available in writable API sessions" : "blocked until OPENAI_API_KEY is set"}`,
     "  Create key: https://platform.openai.com/api-keys",
     "  Billing/limits: https://platform.openai.com/settings/organization/billing/overview",
     "  Current terminal: $env:OPENAI_API_KEY = \"sk-proj-...\"",
@@ -3862,7 +4043,16 @@ function handoffCliArgs(cli, prompt, promptFile, cliArgs) {
 }
 
 async function runTool(opts, name, args) {
-  if (name === "get_runtime_context") return runtimeContext();
+  if (opts.mcpManager?.isManagement(name)) return opts.mcpManager.manage(name, args);
+  if (opts.mcpManager?.has(name)) return opts.mcpManager.call(name, args);
+  const capabilities = modelCapabilities(opts.provider, opts.model);
+  if (name === 'view_image' && !capabilities.vision) {
+    throw new Error(`Model '${opts.model}' cannot receive native image content. Use analyze_image_openai so an OpenAI vision model can inspect the image.`);
+  }
+  if (name === 'generate_image' && !capabilities.imageGeneration) {
+    throw new Error(`Model '${opts.model}' cannot use native image generation. Use generate_image_openai.`);
+  }
+  if (name === "get_runtime_context") return runtimeContext(opts);
 
   if (name === "agent_identity") {
     return jsonResult(activeAgentRuntime(opts).record);
@@ -4326,11 +4516,15 @@ async function runTool(opts, name, args) {
   }
 
   if (name === "view_image") {
-    return viewImage(args);
+    return viewImage(opts, args);
   }
 
   if (name === "analyze_image_openai") {
     return analyzeImageOpenAI(args);
+  }
+
+  if (name === 'generate_image' || name === 'generate_image_openai') {
+    return generateImageOpenAI(opts, args);
   }
 
   if (name === "list_skills") {
@@ -4877,6 +5071,7 @@ async function executeToolCall(opts, call) {
 
 function shouldRunToolsSequentially(opts, calls) {
   if (opts.toolMode === "sequential") return true;
+  if (calls.some((call) => ["mcp_server_add", "mcp_server_remove"].includes(call.function?.name))) return true;
   if (calls.some((call) => call.function?.name === "agent_wait")) return true;
   if (opts.dangerouslyAutoRunCommands) return false;
   return calls.some((call) => ["run_cmd", "run_bash", "run_powershell", "functions_shell_command", "functions.shell_command"].includes(call.function?.name));
@@ -5425,6 +5620,13 @@ async function resumeAgentAfterMessage(opts, agentId) {
 async function processAgentTurns(opts, session) {
   let emptyRecoveryAttempts = 0;
   for (let turn = 0; opts.maxToolTurns === null || turn <= opts.maxToolTurns; turn += 1) {
+    const priorBudget = opts.providerBudget?.checkedAt;
+    await refreshApiBudget(opts);
+    upsertBudgetContext(session.messages, opts.providerBudget);
+    if (opts.providerBudget?.checkedAt !== priorBudget) {
+      session.providerBudget = opts.providerBudget;
+      if (opts.ui) { opts.ui.accountLimits = formatBudget(opts.providerBudget).replace(/^Provider budget:\s*/, ''); opts.ui.schedule(); }
+    }
     const compacted = await ensureContextCompact(opts, session);
     if (compacted && opts.saveSession) await writeSession(opts.session, touchSession(session));
     const response = await streamChat(opts, session.messages);
@@ -5434,6 +5636,8 @@ async function processAgentTurns(opts, session) {
     session.config.provider = opts.provider;
     const { finishReason, ...assistant } = response;
     session.messages.push(assistant);
+    const acceptedMultimodalTurn = !assistant.interrupted && (assistant.tool_calls?.length || String(assistant.content || '').trim());
+    if (acceptedMultimodalTurn) consumeMultimodalResults(session.messages);
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
 
     if (assistant.interrupted) return;
@@ -5496,7 +5700,7 @@ async function processAgentTurns(opts, session) {
       if (sequential) opts.ui?.finishTool(call.id, toolDisplayResult(execution.name, execution.args, execution.result), execution.durationMs, isToolError(execution.result));
       toolTracker.complete(trackerIds.get(call.id), execution.durationMs, isToolError(execution.result));
       writeToolResult(opts, toolDisplayResult(execution.name, execution.args, execution.result), collectPathLikeValues(execution.args));
-      session.messages.push({ role: "tool", tool_call_id: execution.call.id, content: String(execution.result) });
+      session.messages.push({ role: "tool", tool_call_id: execution.call.id, content: execution.result });
       session.touchedFiles = [...(opts.touchedFiles || [])];
       session.cache = { ...(opts.sessionCache || {}) };
       if (opts.saveSession) await writeSession(opts.session, touchSession(session));
@@ -5519,6 +5723,7 @@ async function processAgentTurns(opts, session) {
   const response = await streamChat(finalizerOpts, session.messages, false);
   const { finishReason, ...assistant } = response;
   session.messages.push(assistant);
+  if (!assistant.interrupted) consumeMultimodalResults(session.messages);
   session.tool_turn_limit = {
     reached: true,
     limit: opts.maxToolTurns,
@@ -5957,6 +6162,24 @@ async function handleApiSlash(opts, session, text) {
   return true;
 }
 
+async function runMcpCommand(args) {
+  const [command, name] = args;
+  if (!command || command === "help") { process.stdout.write("Usage: switchyard mcp list | add | remove <name> | test <name>\nSecrets should be referenced as ${env:VARIABLE}, never pasted into config.\n"); return; }
+  if (command === "list") {
+    const servers = await getMcpServers();
+    process.stdout.write(Object.entries(servers).map(([key, value]) => `${key}\t${value.type}${value.enabled === false ? " (disabled)" : ""}`).join("\n") || "No MCP servers configured.");
+    process.stdout.write("\n"); return;
+  }
+  if (command === "add") { await manageMcpServers(); return; }
+  if (!name) throw new Error(`Usage: switchyard mcp ${command} <name>`);
+  if (command === "remove") { process.stdout.write(await removeMcpServer(name) ? `Removed ${name}.\n` : `No MCP server named ${name}.\n`); return; }
+  if (command === "test") {
+    const tools = await inspectMcpServer(name);
+    process.stdout.write(`${name} connected. Tools: ${tools.map(tool => tool.name).join(", ") || "(none)"}\n`); return;
+  }
+  throw new Error(`Unknown MCP command: ${command}`);
+}
+
 async function run() {
   const argv = process.argv.slice(2);
   if (["login", "auth"].includes(argv[0])) {
@@ -5992,6 +6215,7 @@ async function run() {
     await runBalanceCommand(argv.slice(1));
     return;
   }
+  if (argv[0] === "mcp") { await runMcpCommand(argv.slice(1)); return; }
   if (argv[0] === "skill") {
     try {
       await runSkillCommand(argv.slice(1));
@@ -6166,6 +6390,7 @@ async function run() {
   // must see models released since it last ran. Failure is non-fatal by
   // construction -- fetchProviderModels returns null instead of throwing.
   await loadProviderModelCatalog(opts.provider, { baseUrl: opts.baseUrl });
+  await refreshApiBudget(opts, { force: true });
   if (!hasKnownContextLimit(opts.model)) {
     process.stderr.write(
       `[dsw] no context window is recorded for '${opts.model}'; assuming ${opts.contextLimit} tokens. `
@@ -6274,6 +6499,11 @@ async function run() {
     activeTerminalUi = opts.ui;
   }
   try {
+    opts.mcpManager = await createMcpManager({
+      permission: opts.permission,
+      approve: async ({ server, tool, args }) => askYesNo(`Allow MCP call ${server}.${tool}?\n${JSON.stringify(args).slice(0, 1600)}\n`),
+      onNotice: message => opts.ui ? opts.ui.add("notice", message) : (!opts.noOutput && process.stderr.write(`${message}\n`))
+    });
     if (opts.saveSession) await writeSession(opts.session, touchSession(session));
     if (opts.saveSession) writeSessionNotice(opts, sessionPath(opts.session));
     if (userPrompt) await runCoordinatedAgent(opts, session);
@@ -6303,6 +6533,7 @@ async function run() {
     await opts.agentRuntime.stop("failed", { error: error.message });
     throw error;
   } finally {
+    await opts.mcpManager?.close();
     opts.ui?.close();
     if (opts.ui) process.stdin.pause();
     activeTerminalUi = null;

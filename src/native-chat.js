@@ -4,6 +4,7 @@ import { CodexBackend, ClaudeBackend } from './native-backends.js';
 import { newSessionPath, readSession, writeSession, touchSession } from './session-memory.js';
 import { TerminalUI, cleanText } from './terminal-ui.js';
 import { chooseModel, SLASH_HELP, parseSlash } from './connection-picker.js';
+import { formatBudget } from './provider-budget.js';
 
 export async function runNativeChat(opts, helpers) {
   if (opts.providerExplicit || opts.baseUrlExplicit || opts.balanceFallbackProvider) throw new Error('--backend codex/claude uses native account login. Use --backend api for --provider, --base-url, or balance fallback.');
@@ -71,6 +72,12 @@ export async function runNativeChat(opts, helpers) {
       }
     });
     backend.on('notice', notice);
+    backend.on('budget', status => {
+      session.providerBudget = status;
+      const label = formatBudget(status).replace(/^Provider budget:\s*/, '');
+      if (ui) { ui.accountLimits = label; ui.schedule(); }
+      void save().catch(error => { failed = true; notice(`Session save failed: ${error.message}`); });
+    });
     backend.on('account', ({ label }) => { if (ui) { ui.opts.provider = label; ui.schedule(); } else notice(`Connected: ${label}`); });
     backend.on('session', ({ id, model }) => {
       session.native.id = id;
@@ -102,7 +109,7 @@ export async function runNativeChat(opts, helpers) {
           if (['commands', 'help'].includes(slash.name)) notice(SLASH_HELP);
           else if (slash.name === 'session') notice(`${opts.backend} · ${session.model || 'CLI default'}\n${resolve(opts.session)}`);
           else if (slash.name === 'provider') notice('This native history belongs to ' + opts.backend + '. Use /model to change models here. A different engine needs a new session with a context handoff.');
-          else if (slash.name === 'usage') { if (opts.backend === 'codex') await backend.refreshLimits(); else notice('Claude reports rate-limit events; remaining quota is not exposed by this CLI.'); }
+          else if (slash.name === 'usage') { if (opts.backend === 'codex') await backend.refreshLimits(); else notice(formatBudget(backend.budget)); }
           else if (slash.name === 'model') {
             const choose = async (title, hint, items) => {
               if (ui) return ui.select(title, hint, items);

@@ -78,7 +78,8 @@ test("summary provider override cannot inherit the agent endpoint or model", () 
   assert.equal(selected.provider, "anthropic");
   assert.equal(selected.model, "claude-sonnet-4-6");
   assert.equal(selected.baseUrl, "https://api.anthropic.com/v1");
-  assert.equal(selected.contextLimit, 200000);
+  // claude-sonnet-4-6 is a 1M model; verified against the context-windows doc.
+  assert.equal(selected.contextLimit, 1000000);
 });
 
 test("summary calls have a separate prompt, provider format, context budget and no agent tools", async () => {

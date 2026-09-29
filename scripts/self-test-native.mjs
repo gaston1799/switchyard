@@ -4,10 +4,39 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { CodexBackend, ClaudeBackend } from '../src/native-backends.js';
+import { CodexBackend, ClaudeBackend, summarizeClaudeToolResult } from '../src/native-backends.js';
 import { subscriptionEnv, resolveNativeCli } from '../src/native-process.js';
 import { discoverModels, applyApiModel, parseSlash } from '../src/connection-picker.js';
 import { contextLimitFor } from '../src/providers.js';
+import { budgetLevel, claudeBudget, codexBudget, deepSeekBudget, upsertBudgetContext } from '../src/provider-budget.js';
+
+test('provider budgets normalize balances, quota windows, resets, and safe-stop levels', () => {
+  assert.equal(budgetLevel({ balance: 0.2 }), 'critical');
+  assert.equal(budgetLevel({ remainingPercent: 12 }), 'low');
+  assert.equal(deepSeekBudget({ available: true, balances: [{ currency: 'USD', total: 0.75 }] }).level, 'low');
+  const codex = codexBudget({ rateLimits: { limitId: 'codex', primary: { usedPercent: 96, windowDurationMins: 300, resetsAt: 2_000_000_000 } } });
+  assert.equal(codex.level, 'critical');
+  assert.equal(codex.remainingPercent, 4);
+  assert.match(codex.resetAt, /^2033-/);
+  const claude = claudeBudget({ status: 'allowed', utilization: 0.9, resets_at: 2_000_000_000 });
+  assert.equal(Math.round(claude.remainingPercent), 10);
+  assert.equal(claude.level, 'low');
+  const messages = [{ role: 'system', content: 'Stable instructions' }];
+  upsertBudgetContext(messages, codex);
+  upsertBudgetContext(messages, claude);
+  assert.equal((messages[0].content.match(/## Switchyard provider budget/g) || []).length, 1);
+  assert.match(messages[0].content, /Provider budget: claude/);
+});
+
+test('native Claude image results omit base64 while preserving useful metadata', () => {
+  const result = summarizeClaudeToolResult([
+    { type: 'text', text: 'Screenshot loaded' },
+    { type: 'image', file: { base64: 'a'.repeat(1000), type: 'image/png', originalSize: 750, dimensions: { originalWidth: 800, originalHeight: 600 } } }
+  ]);
+  assert.match(result, /Screenshot loaded/);
+  assert.match(result, /image\/png, 800x600, 750 bytes/);
+  assert.doesNotMatch(result, /a{100}/);
+});
 
 const mock = `
 import { createInterface } from 'node:readline';
@@ -45,7 +74,7 @@ for await(const line of createInterface({input:process.stdin})) {
    if(m.request.subtype==='interrupt') send({type:'result',session_id:'claude-123',result:'',usage:{}});
   }
   if(m.type==='user') {
-   turn++;const text=m.message.content;
+   turn++;const text=Array.isArray(m.message.content)?m.message.content[0].text:m.message.content;
    send({type:'system',subtype:'init',session_id:'claude-123',model:'mock-claude'});
    if(text==='crash') process.exit(2);
    if(text==='wait') continue;

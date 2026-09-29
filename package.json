@@ -1,6 +1,6 @@
 {
   "name": "deepseek-detached-agent",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Switchyard: a local coding-agent harness for DeepSeek, GLM, Claude, and GPT.",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
     "dswait": "./src/wait-for-file.js"
   },
   "scripts": {
-    "check": "node --check src/model-pricing.js && node --check src/connection-picker.js && node --check src/native-process.js && node --check src/native-backends.js && node --check src/native-chat.js && node --check src/terminal-ui.js && node --check src/provider-transport.js && node --check src/conversation-turns.js && node --check src/api-error.js && node --check src/providers.js && node --check src/provider-balance.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js && node --check src/docker_tools.js && node --check src/update-check.js",
+    "check": "node --check src/mcp.js && node --check src/multimodal.js && node --check src/model-pricing.js && node --check src/connection-picker.js && node --check src/native-process.js && node --check src/native-backends.js && node --check src/native-chat.js && node --check src/terminal-ui.js && node --check src/provider-transport.js && node --check src/conversation-turns.js && node --check src/api-error.js && node --check src/providers.js && node --check src/provider-balance.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js && node --check src/docker_tools.js && node --check src/update-check.js",
     "ui": "node src/deepseek-watch.js -ui",
     "test:patch": "node scripts/self-test-patch.cjs",
     "test:skills": "node scripts/self-test-skills.mjs",
@@ -58,5 +58,8 @@
   "license": "MIT",
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.1.0"
   }
 }

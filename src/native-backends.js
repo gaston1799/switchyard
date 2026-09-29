@@ -1,5 +1,25 @@
 import { EventEmitter } from 'node:events';
 import { JsonProcess, spawnNative } from './native-process.js';
+import { budgetPrompt, claudeBudget, codexBudget, unavailableBudget } from './provider-budget.js';
+
+export function summarizeClaudeToolResult(content) {
+  if (typeof content === 'string') return content;
+  const blocks = Array.isArray(content) ? content : [content];
+  return blocks.map(block => {
+    if (block?.type === 'text') return block.text || '';
+    if (block?.type === 'image') {
+      const source = block.source || block.file || {};
+      const mime = source.media_type || source.type || 'image';
+      const chars = source.data?.length || source.base64?.length || 0;
+      const bytes = chars ? Math.ceil(chars * 0.75) : source.originalSize;
+      const dimensions = source.dimensions;
+      const size = bytes ? `, ${bytes} bytes` : '';
+      const dims = dimensions ? `, ${dimensions.originalWidth || dimensions.width || '?'}x${dimensions.originalHeight || dimensions.height || '?'}` : '';
+      return `[image ${mime}${dims}${size}; image bytes omitted from Switchyard transcript]`;
+    }
+    return JSON.stringify(block, (key, value) => ['data', 'base64'].includes(key) && typeof value === 'string' ? `[omitted ${value.length} base64 chars]` : value);
+  }).filter(Boolean).join('\n');
+}
 
 class NativeBackend extends EventEmitter {
   constructor(opts, state = {}, interaction = {}) {
@@ -28,6 +48,7 @@ class NativeBackend extends EventEmitter {
     this.emit('delta', { id, text, reasoning });
   }
   async confirm(question) { return this.opts.permission !== 'review' && Boolean(await this.interaction.confirm?.(question)); }
+  budgetText() { return budgetPrompt(this.budget || unavailableBudget(this.opts.backend)); }
   async close() { await this.rpc?.close(); }
 }
 
@@ -52,12 +73,15 @@ export class CodexBackend extends NativeBackend {
     await this.refreshLimits();
   }
   async refreshLimits() {
-    try { const data = await this.rpc.request('account/rateLimits/read'); this.emit('limits', data); }
+    try { const data = await this.rpc.request('account/rateLimits/read'); this.budget = codexBudget(data); this.emit('limits', data); this.emit('budget', this.budget); }
     catch (error) { this.emit('notice', `Codex usage limits unavailable: ${error.message}`); }
   }
   async turn(text) {
     const done = this.begin();
-    this.rpc.request('turn/start', { threadId: this.state.id, input: [{ type: 'text', text, text_elements: [] }], ...(this.opts.model ? { model: this.opts.model } : {}) })
+    this.rpc.request('turn/start', { threadId: this.state.id, input: [
+      { type: 'text', text, text_elements: [] },
+      { type: 'text', text: this.budgetText(), text_elements: [] }
+    ], ...(this.opts.model ? { model: this.opts.model } : {}) })
       .then(result => { this.turnId = result.turn.id; }).catch(error => this.finish(error));
     return done;
   }
@@ -102,7 +126,7 @@ export class CodexBackend extends NativeBackend {
       const usage = p.tokenUsage?.last || p.tokenUsage?.total;
       if (usage) this.emit('usage', { prompt: usage.inputTokens || 0, completion: usage.outputTokens || 0, cached: usage.cachedInputTokens || 0 });
     }
-    if (method === 'account/rateLimits/updated') this.emit('limits', p);
+    if (method === 'account/rateLimits/updated') { this.budget = codexBudget(p); this.emit('limits', p); this.emit('budget', this.budget); }
     if (method === 'warning' || method === 'configWarning') this.emit('notice', p.message || p.summary || 'Codex configuration warning');
     if (method === 'turn/completed') {
       this.turnId = null;
@@ -128,6 +152,7 @@ export class ClaudeBackend extends NativeBackend {
     const account = await claudeAuthStatus();
     if (!account.loggedIn || account.authMethod !== 'claude.ai') throw new Error('Claude subscription mode requires Claude account login. Run: switchyard login claude. For API billing use --backend api --provider anthropic.');
     this.emit('account', { label: `Claude ${account.subscriptionType || ''}`.trim() });
+    this.budget = unavailableBudget('claude', 'awaiting_subscription_rate_limit_event');
     const args = ['--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--permission-prompt-tool', 'stdio'];
     if (this.state.id) args.push('--resume', this.state.id);
     if (this.opts.model) args.push('--model', this.opts.model);
@@ -140,7 +165,9 @@ export class ClaudeBackend extends NativeBackend {
   }
   async turn(text) {
     const done = this.begin(); this.interrupted = false; this.streamMessageId = null;
-    this.rpc.send({ type: 'user', session_id: this.state.id || '', message: { role: 'user', content: text }, parent_tool_use_id: null });
+    this.rpc.send({ type: 'user', session_id: this.state.id || '', message: { role: 'user', content: [
+      { type: 'text', text }, { type: 'text', text: this.budgetText() }
+    ] }, parent_tool_use_id: null });
     return done;
   }
   async interrupt() { this.interrupted = true; await this.rpc.request('interrupt', {}, true); }
@@ -181,7 +208,7 @@ export class ClaudeBackend extends NativeBackend {
       }
     }
     if (message.type === 'user') for (const block of message.message?.content || []) {
-      if (block.type === 'tool_result') this.emit('tool', { id: block.tool_use_id, done: true, result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content), error: block.is_error });
+      if (block.type === 'tool_result') this.emit('tool', { id: block.tool_use_id, done: true, result: summarizeClaudeToolResult(block.content), error: block.is_error });
     }
     if (message.type === 'result') {
       if (!this.messages.size && message.result) this.delta('answer', message.result);
@@ -189,6 +216,10 @@ export class ClaudeBackend extends NativeBackend {
       this.emit('usage', { prompt: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), completion: usage.output_tokens || 0, cached: usage.cache_read_input_tokens || 0 });
       this.finish(message.is_error && !this.interrupted ? new Error((message.errors || []).join('\n') || message.result || `Claude: ${message.subtype}`) : null, this.interrupted);
     }
-    if (message.type === 'rate_limit_event' && message.rate_limit_info?.status !== 'allowed') this.emit('notice', `Claude rate limit: ${message.rate_limit_info?.status || 'updated'}`);
+    if (message.type === 'rate_limit_event') {
+      this.budget = claudeBudget(message.rate_limit_info || {});
+      this.emit('budget', this.budget);
+      if (message.rate_limit_info?.status !== 'allowed') this.emit('notice', `Claude rate limit: ${message.rate_limit_info?.status || 'updated'}`);
+    }
   }
 }

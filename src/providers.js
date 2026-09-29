@@ -15,7 +15,7 @@ export const PROVIDERS = {
   },
   anthropic: {
     label: "Claude", envKey: "ANTHROPIC_API_KEY", protocol: "messages",
-    baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", contextLimit: 200_000
+    baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-6", contextLimit: 1_000_000
   },
   openai: {
     label: "OpenAI", envKey: "OPENAI_API_KEY", protocol: "responses",
@@ -78,9 +78,55 @@ const MODEL_CONTEXT_LIMITS = new Map([
   // guessing high is the direction that breaks a request outright.
   ["gpt-5-chat-latest", 128_000],
   ["gpt-5-search-api", 131_072],
-  // Conservative baseline; callers can explicitly select a larger supported window.
-  ["claude-sonnet-4-6", 200_000],
-  ["claude-opus-4-6", 200_000],
+
+  // GPT-4o -- CONFIRMED at 128K.
+  ["gpt-4o", 128_000],
+  ["gpt-4o-mini", 128_000],
+
+  // o-series reasoning models -- CONFIRMED at 200K.
+  ["o3", 200_000],
+  ["o3-mini", 200_000],
+  ["o4-mini", 200_000],
+
+  // MEASURED 2026-09-21: a ~200K-token request was ACCEPTED, so this is not a
+  // 128K-class model. Priced identically to deepseek-v4-flash and behaves like
+  // it, so it takes the same documented 1M window.
+  ["deepseek-flash", 1_000_000],
+
+  // DELIBERATELY ABSENT: gpt-6-astra. It is priced and callable, but no window
+  // is documented here and guessing high is the direction that fails a request
+  // outright rather than merely compacting early. Measuring it means one
+  // ACCEPTED probe of a few hundred thousand tokens at $10/M input -- rejections
+  // are free, acceptances are not, and only an acceptance sets a lower bound.
+  // Left unknown ON PURPOSE so hasKnownContextLimit() keeps warning; add a real
+  // figure here once one is published.
+  // Claude -- VERIFIED 2026-09-21 against
+  // platform.claude.com/docs/en/build-with-claude/context-windows:
+  //   "Claude Fable 5.1, Mythos 5.1, Fable 5, Mythos 5, Opus 5, Opus 4.8,
+  //    Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 [...] have a 1M-token context
+  //    window [...] 1M is the default: you don't need a beta header."
+  //   "Other Claude models, including Claude Sonnet 4.5, have a 200k-token
+  //    context window."
+  //
+  // The previous entries held sonnet-4-6 and opus-4-6 at 200K as a
+  // "conservative baseline [...] configure a larger window only when your
+  // endpoint supports it". That was true of an older beta-header regime and is
+  // no longer: 1M is the default, so the caution was discarding 800K of usable
+  // context on every one of these models.
+  ["claude-fable-5-1", 1_000_000],
+  ["claude-fable-5", 1_000_000],
+  ["claude-mythos-5-1", 1_000_000],
+  ["claude-mythos-5", 1_000_000],
+  ["claude-opus-5", 1_000_000],
+  ["claude-opus-4-8", 1_000_000],
+  ["claude-opus-4-7", 1_000_000],
+  ["claude-opus-4-6", 1_000_000],
+  ["claude-sonnet-5", 1_000_000],
+  ["claude-sonnet-4-6", 1_000_000],
+  // The 200K generation, explicitly: these are NOT 1M.
+  ["claude-sonnet-4-5", 200_000],
+  ["claude-opus-4-5", 200_000],
+  ["claude-haiku-4-5", 200_000],
   // GLM 4.x — CONFIRMED. 4.6 expanded the window from 128K to 200K; 4.5 and the
   // air variant remain at 128K.
   ["glm-4.5", 131_072],
@@ -124,6 +170,18 @@ const MODEL_CONTEXT_FAMILIES = [
   // this compacts earlier than it needs to; it cannot overrun one. The two
   // models that genuinely sit below the family have exact entries above.
   [/^gpt-5/, 400_000],
+
+  // Claude, anything not named above. The docs put every other Claude model at
+  // 200K, so this is the documented value rather than a guess -- and it is the
+  // safe direction for a future model nobody has added: 200K compacts early on
+  // a 1M model, where the reverse would overrun a 200K one.
+  //
+  // NOTE: Anthropic is the one provider that DOES expose this at runtime. Its
+  // Models API returns max_input_tokens per model, so this family rule could be
+  // replaced by a live read. Not done here: there is no ANTHROPIC_API_KEY
+  // configured to test that path against, and an untested fetch deciding when to
+  // compact is worse than a table checked against the docs.
+  [/^claude-/, 200_000],
 
   // GPT-4.1 family -- CONFIRMED at ~1M by vendor documentation.
   [/^gpt-4\.1/, 1_047_576]

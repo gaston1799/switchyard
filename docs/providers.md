@@ -15,9 +15,19 @@ Use `--model` to select another model available to your API key. Model catalogs 
 discovered from the provider, including Claude pagination. Catalog failure is
 nonfatal. Context limits come from the local model table; unknown models use a
 131,072-token estimate with a warning. For such models, set `--compact-limit` to
-the actual documented context window, especially if it is smaller. The Claude
-4.6 entries use a conservative 200,000-token baseline; explicitly configure a
-larger window only when your selected endpoint supports it.
+the actual documented context window, especially if it is smaller. Context limits come from the local model table, VERIFIED against vendor docs on
+2026-09-21. Claude Fable 5.1, Fable 5, Opus 5, Opus 4.8/4.7/4.6, Sonnet 5 and
+Sonnet 4.6 are 1M by default with no beta header; Sonnet 4.5, Opus 4.5 and Haiku
+4.5 are 200K. The GPT-5 family is 400K (gpt-5-chat-latest is 128K), GPT-4.1 is
+1,047,576, GPT-4o is 128K and the o-series is 200K. An earlier note here called
+200K a "conservative baseline" for the Claude 4.6 entries -- that reflected an
+older beta-header regime and was discarding 800K of usable context.
+
+Anthropic is the one provider that exposes this at runtime: its Models API
+returns `max_input_tokens` per model, so that table could be replaced by a live
+read. OpenAI, DeepSeek and Z.AI return only id/object/created/owned_by, and
+OpenAI's overflow error names no figure, so for those the table is the only
+place the truth can live.
 
 ## Configuration
 
@@ -25,6 +35,27 @@ Use `dsw config set-key`, `set-glm-key`, `set-anthropic-key` (or `set-claude-key
 and `set-openai-key`. Keys are saved in the existing config file. Environment
 variables take precedence: `DEEPSEEK_API_KEY`, `GLM_API_KEY`, `ANTHROPIC_API_KEY`,
 and `OPENAI_API_KEY`. The saved OpenAI key also works for the image analysis tool.
+
+## Multimodal tools
+
+Switchyard gates image tools from the active provider/model name. A known
+vision-capable model receives `view_image`, whose canonical result contains image
+bytes and metadata rather than base64 disguised as text. The transport converts
+that result into OpenAI `input_image`, Anthropic base64 image content, or a
+compatible chat image message. A text-only model receives
+`analyze_image_openai`, which returns text from a separate OpenAI vision request.
+
+OpenAI mainline GPT models also receive `generate_image`. Other models receive
+`generate_image_openai`; Claude can therefore see the generated image in its next
+turn even though generation itself is performed by OpenAI. Codex-specialized GPT
+models use the fallback because OpenAI documents the Responses image-generation
+tool for supported mainline models. Unknown model families default to text-only
+until their multimodal request format is verified.
+
+Native Codex and Claude Code connections are separate: their CLI owns the tool
+loop. Switchyard does not inject these API-backend tools into native sessions.
+The installed Claude Code manifest confirms image input through its `Read` tool
+and exposes no native image-generation tool; see `docs/claude-multimodal-tools.md`.
 
 `DSW_PROVIDER`, `DSW_MODEL`, and `DSW_BASE_URL` supply defaults. Each provider also
 accepts `<PROVIDER>_MODEL` and `<PROVIDER>_BASE_URL`, using canonical names such as
