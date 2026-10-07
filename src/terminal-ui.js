@@ -1,4 +1,21 @@
 import { emitKeypressEvents } from 'node:readline';
+import { spawnSync } from 'node:child_process';
+
+function enableWindowsConsoleMouseInput(input) {
+  if (process.platform !== 'win32') return { enabled: true, detail: '' };
+  if (input !== process.stdin || !input.isTTY) return { enabled: true, detail: '' };
+  // Node's Windows raw mode enables VT input but drops ENABLE_MOUSE_INPUT.
+  // Reopen CONIN$ directly because the inherited stdin handle may be a duplicate.
+  const source = 'using System; using System.Runtime.InteropServices; public static class SwitchyardConsoleMode { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template); [DllImport("kernel32.dll", SetLastError=true)] private static extern bool GetConsoleMode(IntPtr h, out uint mode); [DllImport("kernel32.dll", SetLastError=true)] private static extern bool SetConsoleMode(IntPtr h, uint mode); [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h); public static int EnableMouseInput() { IntPtr h = CreateFile("CONIN$", 0xC0000000u, 3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero); if (h == new IntPtr(-1)) return 2; uint mode; if (!GetConsoleMode(h, out mode)) { CloseHandle(h); return 3; } bool ok = SetConsoleMode(h, mode | 0x10u); CloseHandle(h); return ok ? 0 : 4; } }';
+  const command = `$source = '${source}'; Add-Type -TypeDefinition $source; $result = [SwitchyardConsoleMode]::EnableMouseInput(); if ($result -ne 0) { exit $result }`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 5000
+  });
+  if (!result.error && result.status === 0) return { enabled: true, detail: '' };
+  const output = String(result.stderr || result.stdout || '').replace(/\s+/g, ' ').trim().slice(0, 48);
+  const detail = result.error?.code || `exit-${result.status ?? 'unknown'}${output ? ` ${output}` : ''}`;
+  return { enabled: false, detail };
+}
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 const chars = (s) => [...segmenter.segment(String(s))].map(x => x.segment);
@@ -36,6 +53,7 @@ export class TerminalUI {
     this.entries = []; this.tools = new Map(); this.queue = []; this.confirmations = [];
     this.draft = []; this.cursor = 0; this.offset = 0; this.phase = 'Ready';
     this.results = false; this.reasoning = false; this.busy = true;
+    this.debugInput = process.env.SWITCHYARD_DEBUG_INPUT === '1';
     this.rawWrite = output.write.bind(output); this.frames = []; this.closed = false;
   }
   start(messages = []) {
@@ -67,8 +85,11 @@ export class TerminalUI {
     this.input.on('keypress', this.onKey); this.output.on('resize', this.onResize);
     this.input.once('end', this.onEnd);
     process.once('exit', this.onExit);
-    this.input.setRawMode(true); this.input.resume();
-    this.rawWrite('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[2J');
+    this.input.setRawMode(true);
+    const mouseSetup = enableWindowsConsoleMouseInput(this.input);
+    this.mouseInputEnabled = mouseSetup.enabled; this.mouseInputDetail = mouseSetup.detail;
+    this.input.resume();
+    this.rawWrite('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[2J');
     this.tick = setInterval(() => this.schedule(), 1000); this.tick.unref();
     this.render(); return this;
   }
@@ -139,33 +160,47 @@ export class TerminalUI {
     if (!this.confirmations.length) { this.savedDraft = [this.draft, this.cursor]; this.draft = []; this.cursor = 0; }
     return new Promise(resolve => { this.confirmations.push({ question, resolve }); this.schedule(); });
   }
+  scrollWheel(button) {
+    if (button !== 64 && button !== 65) return;
+    const direction = button === 64 ? -1 : 1;
+    if (this.selection) {
+      const count = this.selectionItems().length;
+      this.selection.index = Math.max(0, Math.min(Math.max(0, count - 1), this.selection.index + direction));
+      if (this.debugInput) this.lastInput = button === 64 ? 'wheel-up (previous choice)' : 'wheel-down (next choice)';
+    } else {
+      this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
+      if (this.debugInput) this.lastInput = button === 64 ? 'wheel-up (+3 rows)' : 'wheel-down (-3 rows)';
+    }
+    this.schedule();
+  }
   key(str, key) {
     // SGR mouse wheel events arrive as CSI < button ; x ; y M sequences.
     // Three transcript rows per notch keeps wheel scrolling distinct from PgUp/Dn.
     const sequence = key.sequence || '';
-    if (sequence === '\x1b[<') { this.mouseSequence = ''; return; }
-    if (this.mouseSequence !== undefined) {
-      this.mouseSequence += str || '';
-      if (this.mouseSequence.length > 32) { this.mouseSequence = undefined; return; }
-      if (!/[Mm]$/.test(this.mouseSequence)) return;
-      const mouse = /^([0-9]+);\d+;\d+[Mm]$/.exec(this.mouseSequence);
+    if (this.debugInput && (sequence.startsWith('\x1b') || ['pageup', 'pagedown'].includes(key.name))) {
+      this.lastInput = ['pageup', 'pagedown'].includes(key.name) ? key.name : sequence.replaceAll('\x1b', 'ESC');
+    }
+    const fullMouse = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(sequence);
+    if (fullMouse) {
       this.mouseSequence = undefined;
-      if (!mouse) return;
-      const button = Number(mouse[1]);
-      if ((button === 64 || button === 65) && !this.selection) {
-        this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
-        this.schedule();
-      }
+      this.scrollWheel(Number(fullMouse[1]));
       return;
     }
-    const mouse = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(sequence);
-    if (mouse && !this.selection) {
-      const button = Number(mouse[1]);
-      if (button === 64 || button === 65) {
-        this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
-        this.schedule();
+    if (sequence === '\x1b[<') { this.mouseSequence = ''; this.mouseSequenceStarted = Date.now(); return; }
+    if (this.mouseSequence !== undefined) {
+      const stale = Date.now() - this.mouseSequenceStarted > 150;
+      const chunk = str || sequence;
+      if (!stale && !sequence.startsWith('\x1b') && /^[0-9;Mm]*$/.test(chunk)) {
+        this.mouseSequence += chunk;
+        if (this.mouseSequence.length > 32) { this.mouseSequence = undefined; return; }
+        if (!/[Mm]$/.test(this.mouseSequence)) return;
+        const mouse = /^([0-9]+);\d+;\d+[Mm]$/.exec(this.mouseSequence);
+        this.mouseSequence = undefined;
+        if (!mouse) return;
+        this.scrollWheel(Number(mouse[1]));
         return;
       }
+      this.mouseSequence = undefined;
     }
     if (this.selection) {
       const items = this.selectionItems();
@@ -192,7 +227,16 @@ export class TerminalUI {
     if (key.ctrl && key.name === 'r') { this.reasoning = !this.reasoning; this.schedule(); return; }
     if (key.ctrl && key.name === 'e') { this.results = !this.results; this.schedule(); return; }
     if (key.ctrl && key.name === 'l') { this.frames = []; this.schedule(); return; }
-    if (key.name === 'pageup' || key.name === 'pagedown') { this.offset = Math.max(0, this.offset + (key.name === 'pageup' ? 1 : -1) * Math.max(1, (this.output.rows || 24) - 8)); this.schedule(); return; }
+    // Some Windows Terminal profiles translate the wheel to cursor arrows
+    // while the alternate screen is active instead of sending SGR mouse data.
+    if (!this.draft.length && (key.name === 'up' || key.name === 'down')) {
+      this.offset = Math.max(0, this.offset + (key.name === 'up' ? 3 : -3));
+      if (this.debugInput) this.lastInput = key.name === 'up' ? 'up-arrow (+3 rows)' : 'down-arrow (-3 rows)';
+      this.schedule(); return;
+    }
+    const pageUp = key.name === 'pageup' || sequence === '\x1b[5~';
+    const pageDown = key.name === 'pagedown' || sequence === '\x1b[6~';
+    if (pageUp || pageDown) { this.offset = Math.max(0, this.offset + (pageUp ? 1 : -1) * Math.max(1, (this.output.rows || 24) - 8)); this.schedule(); return; }
     if (key.name === 'escape' || key.ctrl && key.name === 'c') {
       if (this.confirmations.length) this.submit('n');
       else if (this.interrupt) this.interrupt();
@@ -291,7 +335,8 @@ export class TerminalUI {
     while (view.length < bodyHeight) view.push('');
     const elapsed = this.busy && this.started ? ` · ${Math.floor((Date.now() - this.started) / 1000)}s` : '';
     const usage = this.usage ? ` · ${this.usage.prompt.toLocaleString()} in · ${this.usage.completion.toLocaleString()} out · ${this.usage.share}% cached` : this.busy ? ` · ~${this.tokens || 0} generated` : '';
-    const status = `${this.accountLimits ? this.accountLimits + ' · ' : ''}${this.phase}${elapsed}${this.queue.length ? ` · ${this.queue.length} queued` : ''}${this.offset ? ` · ↑ ${this.offset} rows` : ''}${usage}`;
+    const inputDebug = this.debugInput && this.lastInput ? ` · input ${this.lastInput}` : '';
+    const status = `${this.accountLimits ? this.accountLimits + ' · ' : ''}${this.phase}${elapsed}${this.queue.length ? ` · ${this.queue.length} queued` : ''}${this.offset ? ` · ↑ ${this.offset} rows` : ''}${usage}${inputDebug}`;
     const before = this.draft.slice(0, this.cursor).join('').replace(/\n/g, '↵');
     const after = this.draft.slice(this.cursor).join('').replace(/\n/g, '↵');
     const available = Math.max(1, width - 7); let visible = chars(before);
@@ -308,7 +353,7 @@ export class TerminalUI {
       muted(border('╭─ ', modal ? ' Permission ' : ' Message ', '╮')),
       muted('│ ') + paint('96', '› ') + (inputText ? inputBody : muted(inputBody)) + ' '.repeat(Math.max(0, width - cellWidth(inputBody) - 5)) + muted('│'),
       muted(border('╰', '', '╯')),
-      muted(clip(this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /permission  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
+      muted(clip(this.debugInput ? `DEBUG INPUT mouse=${this.mouseInputEnabled ? 'on' : `off (${this.mouseInputDetail})`}: ${this.lastInput || 'waiting for key or wheel'}` : this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /permission  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
     ];
     if (height < 8) {
       frame.splice(0, frame.length, clip(this.opts.permission === 'yolo' ? 'Switchyard · YOLO MODE' : 'Switchyard', width), ...Array.from({ length: height - 3 }, () => ''), clip(status, width), clip('> ' + inputText, width));
@@ -327,7 +372,7 @@ export class TerminalUI {
     this.output.write = this.oldOut; this.error.write = this.oldErr;
     try { this.input.setRawMode(Boolean(this.oldRaw)); } catch {}
     if (this.oldPaused) this.input.pause();
-    this.rawWrite('\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l');
+    this.rawWrite('\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l');
     for (const pending of this.confirmations) pending.resolve(false);
     if (this.waiter) this.waiter('/exit');
   }

@@ -1,6 +1,6 @@
 {
   "name": "deepseek-detached-agent",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Switchyard: a local coding-agent harness for DeepSeek, GLM, Claude, and GPT.",
   "type": "module",
   "bin": {

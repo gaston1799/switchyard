@@ -1,5 +1,12 @@
 # Switchyard releases
 
+## v0.3.3 — 2026-10-07
+
+Fixes terminal scrolling after incomplete mouse input. Page Up/Down sequences are
+handled directly, partial mouse events cannot consume subsequent keyboard input,
+Windows mouse input is re-enabled after Node switches the terminal to raw mode,
+and Windows Terminal's wheel-to-arrow fallback scrolls three rows per notch.
+
 ## v0.3.2 — 2026-10-07
 
 This patch release expands provider and agent setup, tightens permission handling,
