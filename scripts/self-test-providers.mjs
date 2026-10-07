@@ -16,7 +16,7 @@ async function collect(iterable) { const items = []; for await (const item of it
 const tools = [{ type: "function", function: { name: "read_text_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }];
 const calls = [{ id: "call_1", type: "function", function: { name: "read_text_file", arguments: '{"path":"note.txt"}' } }];
 const history = [{ role: "system", content: "Stable instructions" }, { role: "user", content: "Read note" }, { role: "assistant", content: "", tool_calls: calls }, { role: "tool", tool_call_id: "call_1", content: "hello" }];
-const optsFor = (provider) => ({ provider, model: ({ anthropic: "claude-sonnet-4-6", openai: "gpt-5", deepseek: "deepseek-v4-flash", glm: "glm-4.7" })[provider], maxTokens: 4096, thinking: "enabled", effort: "high", session: "test-session" });
+const optsFor = (provider) => ({ provider, model: ({ anthropic: "claude-sonnet-4-6", openai: "gpt-5", deepseek: "deepseek-v4-flash", glm: "glm-4.7", reflection: "Beam-501B-A23B" })[provider], maxTokens: 4096, thinking: "enabled", effort: "high", session: "test-session" });
 const sse = (events) => events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
 function responseStream(events) {
   const bytes = new TextEncoder().encode(sse(events));
@@ -29,7 +29,9 @@ function responseStream(events) {
 test("provider aliases and wire formats preserve call/result pairing without leaking session fields", () => {
   assert.equal(normalizeProvider("claude"), "anthropic");
   assert.equal(normalizeProvider("gpt"), "openai");
-  for (const provider of ["deepseek", "glm", "anthropic", "openai"]) {
+  assert.equal(normalizeProvider('reflection'), 'reflection');
+  assert.equal(contextLimitFor('reflection', 'Beam-501B-A23B'), 262_144);
+  for (const provider of ["deepseek", "glm", "anthropic", "openai", "reflection"]) {
     const opts = optsFor(provider);
     const request = buildProviderRequest(opts, history, { tools, apiKey: "test", stream: true });
     const body = JSON.parse(request.init.body);
@@ -46,6 +48,13 @@ test("provider aliases and wire formats preserve call/result pairing without lea
       assert.equal(body.tools[0].strict, false);
       assert.equal(body.thinking, undefined);
       assert.equal(body.prompt_cache_key, JSON.parse(buildProviderRequest(opts, [...history, { role: "user", content: "next" }], { apiKey: "test" }).init.body).prompt_cache_key);
+    } else if (provider === 'reflection') {
+      assert.equal(request.url, 'https://api.reflection.ai/openai/v1/chat/completions');
+      assert.equal(body.reasoning_effort, 'high');
+      assert.equal(body.messages.at(-1).tool_call_id, 'call_1');
+      assert.equal(body.tools[0].function.name, 'read_text_file');
+      const low = JSON.parse(buildProviderRequest({ ...opts, thinking: 'disabled' }, history, { apiKey: 'test' }).init.body);
+      assert.equal(low.reasoning_effort, 'low');
     } else {
       assert.ok(request.url.endsWith("/chat/completions"));
       assert.equal(body.messages.at(-1).tool_call_id, "call_1");
@@ -178,6 +187,17 @@ test("Claude model discovery follows pagination and honors custom endpoints", as
   } });
   assert.deepEqual(models, ["a", "b"]);
   assert.match(seen[1], /after_id=a/);
+});
+
+test('Reflection model discovery uses its official OpenAI-compatible catalog', async () => {
+  let requestedUrl = '';
+  const models = await fetchProviderModels('reflection', 'test-key', { fetchImpl: async (url, init) => {
+    requestedUrl = url;
+    assert.equal(init.headers.authorization, 'Bearer test-key');
+    return Response.json({ data: [{ id: 'Beam-501B-A23B' }] });
+  } });
+  assert.equal(requestedUrl, 'https://api.reflection.ai/openai/v1/models');
+  assert.deepEqual(models, ['Beam-501B-A23B']);
 });
 
 function runCli(script, args, cwd, env) {
@@ -354,7 +374,7 @@ test("every priced model has a known context window, except the one documented o
   let provider = null;
   const priced = [];
   for (const line of lines) {
-    const head = line.match(/^\s{2}(openai|anthropic|glm|deepseek):\s*\{/);
+    const head = line.match(/^\s{2}(openai|anthropic|glm|deepseek|reflection):\s*\{/);
     if (head) { provider = head[1]; continue; }
     if (/^\s{2}\},?\s*$/.test(line)) { provider = null; continue; }
     const id = line.match(/^\s*'([^']+)':\s*\[/);
@@ -362,8 +382,17 @@ test("every priced model has a known context window, except the one documented o
   }
   assert.ok(priced.length >= 50, `parsed only ${priced.length} priced models -- the parse broke, not the table`);
   const unknown = priced.filter((id) => !hasKnownContextLimit(id));
-  // gpt-6-astra is left unknown on purpose so the warning keeps firing.
-  assert.deepEqual(unknown, ["gpt-6-astra"], `unexpected models without a window: ${unknown.join(", ")}`);
+  // GPT-6 windows have not been published. Embeddings/moderation and legacy
+  // completion-only IDs are not chat context windows; GLM flashX's window is
+  // also not published. Keep these explicit so they continue to warn/fail safe.
+  const expectedUnknown = [
+    'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'o3-pro', 'o1', 'o1-pro',
+    'gpt-4-turbo-2024-04-09', 'gpt-4o-2024-05-13', 'gpt-4-0613', 'gpt-3.5-turbo',
+    'gpt-3.5-turbo-0125', 'gpt-3.5-turbo-1106', 'gpt-3.5-turbo-instruct', 'davinci-002',
+    'babbage-002', 'chat-latest', 'text-embedding-3-small', 'text-embedding-3-large',
+    'text-embedding-ada-002', 'omni-moderation-latest', 'glm-5.3-flashx', 'glm-ocr'
+  ];
+  assert.deepEqual(unknown, expectedUnknown, `unexpected models without a window: ${unknown.join(", ")}`);
 });
 
 /**

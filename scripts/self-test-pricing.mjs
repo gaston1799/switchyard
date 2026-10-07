@@ -51,7 +51,23 @@ test('subscription model order and provider billing descriptions are preserved',
 test('Claude cache writes are separate from the uncached comparison estimate', () => {
   const [model] = priceModelChoices(choices(['claude-haiku-4-5']), { provider: 'anthropic' });
   assert.match(model.description, /write 5m \$1.25/);
+  assert.match(model.description, /write 1h \$2/);
   assert.equal(sampleCost(model.price), 0.015);
+});
+
+test('current provider rates cover new catalog entries and keep unpublished Beam price unknown', () => {
+  assert.deepEqual(modelPrice('openai', 'gpt-6.1-sol'), {
+    input: 2, cached: 0.1, output: 10, write: 2.5, write1h: undefined,
+    source: 'https://developers.openai.com/api/docs/pricing', checked: '2026-10-06'
+  });
+  assert.deepEqual(modelPrice('glm', 'glm-5.3-flashx'), {
+    input: 0.37, cached: 0.075, output: 1.25, write: undefined, write1h: undefined,
+    source: 'https://docs.z.ai/guides/overview/pricing', checked: '2026-10-06'
+  });
+  assert.equal(modelPrice('reflection', 'Beam-501B-A23B'), null);
+  const [beam] = priceModelChoices(choices(['Beam-501B-A23B']), { provider: 'reflection' });
+  assert.match(beam.description, /Price unknown/);
+  assert.equal(beam.sampleCost, null);
 });
 
 test('model catalog failure keeps the manual-entry fallback usable', async () => {

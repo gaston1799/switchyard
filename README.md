@@ -1,6 +1,6 @@
 # Switchyard — coding-agent harness
 
-> A local coding-agent harness for DeepSeek, GLM, Claude, and GPT. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
+> A local coding-agent harness for DeepSeek, GLM, Claude, GPT, and Reflection Beam. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
 
 `switchyard` is the main command. `d`, `dsw`, and `ds` remain interactive aliases; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.
 
@@ -24,7 +24,7 @@
 - **Claude fallback** — `dsd` falls back to `claude -p` if DeepSeek is unavailable
 - **Dependency-light CLI** — core agent tools use built-in Node APIs; Electron is used only for `d -ui`
 - **OpenAI-compatible** — point at any compatible endpoint via `--base-url`
-- **Provider adapters** — DeepSeek/GLM chat completions, Claude Messages, and GPT Responses; use `--provider deepseek|glm|anthropic|openai`. `claude` and `gpt` are accepted aliases.
+- **Provider adapters** — DeepSeek/GLM/Reflection chat completions, Claude Messages, and GPT Responses; use `--provider deepseek|glm|anthropic|openai|reflection`. `claude` and `gpt` are accepted aliases.
 - **Automatic prompt caching** — Claude automatic cache control, implicit caching on the other providers, and normalized input/cache-read/cache-write/output usage.
 - **Automatic context compaction** — provider/model budgets, a replaced prefix summary, 15 complete tool-safe turns, and bounded deterministic fallback.
 - **MCP servers** — connect local stdio and remote Streamable HTTP Model Context Protocol servers to API-backed sessions; calls follow Switchyard permission prompts.
@@ -38,14 +38,15 @@ not a budget cap or prediction of total agent cost. Tool schemas, history, reaso
 and repeated requests add tokens. Tool fees, long-context premiums, and other billing
 modifiers can add cost. DeepSeek shows peak reference rates (off-peak is half).
 
-The bundled reference table was checked **2026-09-21**, and is not fetched live.
+The bundled reference table was checked **2026-10-06**, and is not fetched live. Reflection's Beam API is in beta and has no published token price yet, so its price stays unknown.
 Unverified IDs (including snapshots without a verified entry) show **Price unknown**.
 Custom endpoints show vendor reference prices only. Codex/Claude Code account
 connections show plan/usage-limit labels and preserve provider credit notices.
 Sources: [OpenAI](https://developers.openai.com/api/docs/pricing) and its individual
 model pages, [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
 [Z.AI](https://docs.z.ai/guides/overview/pricing), and
-[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/).
+[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing/), and
+[Reflection model/API docs](https://developers.reflection.ai/models).
 
 ---
 
@@ -181,7 +182,7 @@ Commands entered during a response are queued and processed after the current
 turn/task. Unknown slash commands show help and are not sent to a model.
 
 **Sessions belong to conversations, not individual models.** API sessions retain
-messages and tool-call/result pairs when switching between DeepSeek, GLM, OpenAI,
+messages and tool-call/result pairs when switching between DeepSeek, GLM, OpenAI, Reflection,
 and Anthropic. Provider-specific reasoning state is discarded on a switch and
 the context budget is recalculated. Switching API provider sends the saved
 conversation to that provider. Resume offers a saved-model option, a new model,
@@ -255,6 +256,13 @@ API-key billing remains available through `--backend api --provider openai` or
   mode and its existing rules. `review` uses Codex's read-only sandbox with no
   approvals, or Claude's Read/Glob/Grep tools with no MCP tools. `full` explicitly
   selects native unrestricted execution, subject to managed CLI policies.
+- `--permission yolo` also starts native sessions with automatic approvals and
+  unrestricted execution. API sessions can switch modes with `/permission`
+  or `/permission <review|ask|full|yolo>`; the change is saved into the chat
+  transcript for the model's next turn. Native CLI policies are fixed at start,
+  so their `/permission` command explains how to restart with another mode. In
+  API YOLO sessions, coordinators can access paths outside the workspace;
+  workers remain workspace-confined and task-scope checks still apply.
 - The TUI streams replies and tool activity. Escape interrupts generation.
   Enter queues a follow-up. Native sessions open straight into the input box.
 - `/model` opens the connection model picker; `/model <name>` changes it for later turns.
@@ -300,10 +308,12 @@ a saved session retains its own backend.
 | `review` | Read files and list directories only |
 | `ask` *(default)* | Same + prompts before writing files or running shell commands |
 | `full` | All tools run automatically without prompting |
+| `yolo` | Automatically approves tool and command requests; prominently marked in the TUI |
 
 ```bash
 switchyard --permission review -p "audit the auth module"
 switchyard --permission full   -p "refactor utils.js to use ES modules"
+switchyard --permission yolo   -p "run the authorized task without approval prompts"
 ```
 
 ### Unattended, scoped work
@@ -386,7 +396,7 @@ In terminals that support OSC-8 hyperlinks, the TUI turns exact workspace file p
 | `git_log` | Commit log (one-line format) |
 | `git_blame` | Line-range blame |
 | `cache_set` / `cache_get` | Session key-value store persisted with saved session files |
-| `list_skills` / `read_skill` | Discover and read local skills from configured skill roots |
+| `list_skills` / `read_skill` / `install_skill` | Discover and read local skills; persist a skill from Switchyard's bundled catalog |
 | `create_goal` / `get_goal` / `update_goal` | Persistent session goal state for long-running work |
 | `update_plan` / `get_plan` | Persistent visible plan steps with statuses |
 | `session_health` | Session integrity, progress, touched files, and repair-needs summary |
@@ -542,10 +552,10 @@ self-tests.
   --skills <a,b>                   Comma-separated skills to load
   --skill-root <dir>               Directory containing skill folders; repeatable
   --list-skills                    List discovered local skills and exit
-  --provider <name>                deepseek, glm, anthropic, openai (default: deepseek)
+  --provider <name>                deepseek, glm, anthropic, openai, reflection (default: deepseek)
   --model <name>                   Model (selected provider default)
   --base-url <url>                 Provider API base URL
-  --effort <high|max>              Reasoning effort (default: high)
+  --effort <effort>                Reasoning effort; Reflection accepts low|medium|high|xhigh|max
   --thinking <enabled|disabled>    Thinking toggle (default: enabled)
   --max-tokens <n>                 Max output tokens (default: 16384)
   --timeout <ms>                   Per-turn timeout ms (default: 600000)
@@ -553,7 +563,7 @@ self-tests.
   --tool-mode <parallel|sequential>
                                    parallel = concurrent tool calls (default)
                                    sequential = run in order
-  --permission <review|ask|full>   Session permission level
+  --permission <review|ask|full|yolo> Session permission level
   --session <file>                 Session JSON file
   --resume                         Resume from --session or pick from list
   --no-save-session                Don't persist session to disk
@@ -589,10 +599,12 @@ Skill discovery checks, in order:
 
 - directories passed with `--skill-root`
 - directories from `DEEPSEEK_SKILLS_DIR` (path-delimited)
-- `.deepseek-watch/skills` in the current workspace
+- `~/.deepseek/skills`
 - `~/.codex/skills`, including Codex hidden grouping folders such as `.system`
+- `.deepseek-watch/skills` in the current workspace
+- Switchyard's bundled `skills/` catalog (available in source and packaged installs)
 
-Use `--list-skills` to see discovered skills. During a session, DeepSeek can also call `list_skills` and `read_skill` to inspect skills that were not preloaded.
+Use `--list-skills` to see discovered skills. During a session, call `list_skills` and `read_skill` to inspect/load a skill immediately. Use `install_skill` to copy a bundled skill into the persistent `~/.deepseek/skills/` directory; ask-mode sessions request confirmation, and review-only sessions cannot install. Model-facing installation is limited to Switchyard's shipped catalog. For an explicit path or GitHub repo, use `switchyard skill install <path-or-repo>` in the CLI.
 
 When you resume with a skill, the wrapper refreshes the saved system message and persists the skill list in the session JSON:
 
@@ -686,10 +698,20 @@ switchyard config set-key <key>   # save to %APPDATA%\deepseek-detached-agent\co
 switchyard config set-glm-key <key> # save a Z.AI GLM key in the same config file
 switchyard config set-anthropic-key <key> # Claude API key
 switchyard config set-openai-key <key> # GPT and OpenAI image tools
+switchyard config set-reflection-key <key> # Reflection Beam API
 switchyard config set-google-search-key <key>
 switchyard config set-google-search-engine-id <engine-id>
 switchyard config path            # show config file location
 ```
+
+## Support
+
+Switchyard can occasionally offer an optional link to Gaston's personal portfolio
+support page, which supports work across his projects. The reminder appears at
+most once every 30 days. Choose **Sure** to open the page, **Ask me later** to
+delay it for 30 days, or **I already donated** to stop reminders. You can open
+the page any time with `switchyard support`. Reminder state is stored locally
+in the user config and is skipped for non-interactive runs.
 
 DeepSeek publishes a read-only balance endpoint but no supported payment or
 automatic top-up API. Use a one-shot guard in scripts or Task Scheduler:
@@ -721,6 +743,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 GLM_API_KEY=your-z-ai-key
 ANTHROPIC_API_KEY=your-anthropic-key
 OPENAI_API_KEY=your-openai-key
+REFLECTION_API_KEY=your-reflection-key
 DSW_PROVIDER=deepseek
 DSW_BALANCE_FALLBACK_PROVIDER=glm
 GOOGLE_SEARCH_API_KEY=...

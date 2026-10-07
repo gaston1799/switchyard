@@ -26,6 +26,9 @@ Do not edit a scope claimed by another agent unless it explicitly hands the task
 
 ## Resuming agents and sessions
 
+- In the interactive startup flow, API-backed new runs ask whether this session is a **Coordinator** or **Worker**. The flow creates a stable agent ID and uses `.deepseek-watch/coordination` as the shared board by default; enter the same absolute directory in every worktree to share a board across them. Coordinators can enter a mission; workers can enter a coordinator ID and mission, or leave the ID blank to discover a coordinator from the board.
+- Native Codex and Claude sessions cannot join this board yet because their provider-owned tool loops do not expose Switchyard coordination tools. Choose an API-backed connection for swarm roles.
+
 - `d --resume` in a workspace whose `.deepseek-watch/coordination` has agents now offers a combined picker: **coordination agents first** (id, state, session), then saved sessions. Picking an agent resumes that agent's session and identity.
 - `d --agent-id <existing>` (no `--session`, no `--new`) auto-resumes that agent's most recent session — via the workspace session list, falling back to the agent's **coordination record** (which stores the definitive absolute session path, so it works from any cwd).
 - Resuming an id that is **currently live** fails with "already active" — one process per id.

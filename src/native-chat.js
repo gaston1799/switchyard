@@ -109,6 +109,7 @@ export async function runNativeChat(opts, helpers) {
           if (['commands', 'help'].includes(slash.name)) notice(SLASH_HELP);
           else if (slash.name === 'session') notice(`${opts.backend} · ${session.model || 'CLI default'}\n${resolve(opts.session)}`);
           else if (slash.name === 'provider') notice('This native history belongs to ' + opts.backend + '. Use /model to change models here. A different engine needs a new session with a context handoff.');
+          else if (slash.name === 'permission') notice(`Native ${opts.backend} permissions are fixed when its CLI session starts. Restart this session with --permission ${slash.argument || '<review|ask|full|yolo>'} to apply a different mode.`);
           else if (slash.name === 'usage') { if (opts.backend === 'codex') await backend.refreshLimits(); else notice(formatBudget(backend.budget)); }
           else if (slash.name === 'model') {
             const choose = async (title, hint, items) => {

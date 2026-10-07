@@ -119,6 +119,22 @@
       opacity: 0.62;
     }
 
+    dialog {
+      width: min(480px, calc(100vw - 32px));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      color: var(--text);
+      box-shadow: 0 24px 80px #0009;
+      padding: 24px;
+    }
+    dialog::backdrop { background: #07090dcc; }
+    dialog h2 { color: var(--text); font-size: 20px; margin-bottom: 12px; }
+    dialog p { color: var(--muted); line-height: 1.55; }
+    .support-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    .support-actions button { min-height: 38px; height: auto; padding: 8px 12px; }
+    .support-actions .quiet { background: var(--panel-2); border-color: var(--line); }
+
     .toolbar {
       display: grid;
       grid-template-columns: 1fr auto;
@@ -421,6 +437,7 @@
           <select id="permission">
             <option value="review">Review only</option>
             <option value="full">Full access</option>
+            <option value="yolo">⚠ YOLO mode (auto-approve)</option>
           </select>
         </label>
         <button id="send">Run</button>
@@ -477,6 +494,16 @@
     </main>
   </div>
 
+  <dialog id="support-dialog" aria-labelledby="support-title">
+    <h2 id="support-title">Support Gaston's work</h2>
+    <p>Enjoying these tools? If you'd like, you can support my projects through my personal portfolio. This is optional and helps fund work across projects.</p>
+    <div class="support-actions">
+      <button class="quiet" id="support-later">Ask me later</button>
+      <button class="quiet" id="support-donated">I already donated</button>
+      <button id="support-open">Sure, open the page</button>
+    </div>
+  </dialog>
+
   <script>
     const promptEl = document.querySelector("#prompt");
     const permissionEl = document.querySelector("#permission");
@@ -492,6 +519,7 @@
     const statusEl = document.querySelector("#status");
     const titleEl = document.querySelector("#title");
     const runMetaEl = document.querySelector("#run-meta");
+    const supportDialog = document.querySelector("#support-dialog");
     const metaEl = document.querySelector("#meta");
 
     let runs = [];
@@ -552,7 +580,7 @@
           selectedRunId = null;
           selectedSessionPath = session.path;
           currentSession = await window.deepseekUi.readSession(session.path);
-          permissionEl.value = ["review", "full"].includes(currentSession.permission) ? currentSession.permission : "review";
+          permissionEl.value = ["review", "full", "yolo"].includes(currentSession.permission) ? currentSession.permission : "review";
           render();
         });
         sessionsEl.appendChild(item);
@@ -764,7 +792,7 @@
       } else if (sessions[0]) {
         selectedSessionPath = sessions[0].path;
         currentSession = await window.deepseekUi.readSession(selectedSessionPath);
-        permissionEl.value = ["review", "full"].includes(currentSession.permission) ? currentSession.permission : "review";
+        permissionEl.value = ["review", "full", "yolo"].includes(currentSession.permission) ? currentSession.permission : "review";
       }
       render();
     }
@@ -787,9 +815,27 @@
 
     sendEl.addEventListener("click", startRun);
 
+    async function respondToSupport(choice) {
+      try {
+        await window.deepseekUi.respondSupport(choice);
+        supportDialog.close();
+      } catch (error) {
+        const message = document.createElement("p");
+        message.textContent = `Could not save that choice: ${error.message}`;
+        supportDialog.appendChild(message);
+      }
+    }
+    document.querySelector("#support-later").addEventListener("click", () => respondToSupport("later"));
+    document.querySelector("#support-donated").addEventListener("click", () => respondToSupport("donated"));
+    document.querySelector("#support-open").addEventListener("click", () => respondToSupport("open"));
+    supportDialog.addEventListener("cancel", (event) => { event.preventDefault(); respondToSupport("later"); });
+
     window.deepseekUi.info().then((info) => {
       metaEl.textContent = `${info.workspace}\nAPI http://127.0.0.1:${info.controlPort} · CDP ${info.cdpPort}`;
     });
+    window.deepseekUi.supportStatus().then((state) => {
+      if (state.due && !supportDialog.open) supportDialog.showModal();
+    }).catch(() => {});
     window.deepseekUi.listRuns().then((initial) => {
       runs = initial;
       render();

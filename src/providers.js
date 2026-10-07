@@ -20,6 +20,10 @@ export const PROVIDERS = {
   openai: {
     label: "OpenAI", envKey: "OPENAI_API_KEY", protocol: "responses",
     baseUrl: "https://api.openai.com/v1", model: "gpt-5", contextLimit: 400_000
+  },
+  reflection: {
+    label: "Reflection AI", envKey: "REFLECTION_API_KEY",
+    baseUrl: "https://api.reflection.ai/openai/v1", model: "Beam-501B-A23B", contextLimit: 262_144
   }
 };
 
@@ -92,6 +96,7 @@ const MODEL_CONTEXT_LIMITS = new Map([
   // 128K-class model. Priced identically to deepseek-v4-flash and behaves like
   // it, so it takes the same documented 1M window.
   ["deepseek-flash", 1_000_000],
+  ["beam-501b-a23b", 262_144],
 
   // DELIBERATELY ABSENT: gpt-6-astra. It is priced and callable, but no window
   // is documented here and guessing high is the direction that fails a request

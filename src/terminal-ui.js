@@ -68,7 +68,7 @@ export class TerminalUI {
     this.input.once('end', this.onEnd);
     process.once('exit', this.onExit);
     this.input.setRawMode(true); this.input.resume();
-    this.rawWrite('\x1b[?1049h\x1b[?2004h\x1b[2J');
+    this.rawWrite('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[2J');
     this.tick = setInterval(() => this.schedule(), 1000); this.tick.unref();
     this.render(); return this;
   }
@@ -140,6 +140,33 @@ export class TerminalUI {
     return new Promise(resolve => { this.confirmations.push({ question, resolve }); this.schedule(); });
   }
   key(str, key) {
+    // SGR mouse wheel events arrive as CSI < button ; x ; y M sequences.
+    // Three transcript rows per notch keeps wheel scrolling distinct from PgUp/Dn.
+    const sequence = key.sequence || '';
+    if (sequence === '\x1b[<') { this.mouseSequence = ''; return; }
+    if (this.mouseSequence !== undefined) {
+      this.mouseSequence += str || '';
+      if (this.mouseSequence.length > 32) { this.mouseSequence = undefined; return; }
+      if (!/[Mm]$/.test(this.mouseSequence)) return;
+      const mouse = /^([0-9]+);\d+;\d+[Mm]$/.exec(this.mouseSequence);
+      this.mouseSequence = undefined;
+      if (!mouse) return;
+      const button = Number(mouse[1]);
+      if ((button === 64 || button === 65) && !this.selection) {
+        this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
+        this.schedule();
+      }
+      return;
+    }
+    const mouse = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(sequence);
+    if (mouse && !this.selection) {
+      const button = Number(mouse[1]);
+      if (button === 64 || button === 65) {
+        this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
+        this.schedule();
+        return;
+      }
+    }
     if (this.selection) {
       const items = this.selectionItems();
       if (key.name === 'escape' || key.ctrl && key.name === 'c') { this.finishSelection(null); return; }
@@ -155,7 +182,7 @@ export class TerminalUI {
       this.schedule(); return;
     }
     if (key.name === 'tab' && this.draft.join('').startsWith('/')) {
-      const command = ['/commands', '/help', '/model', '/provider', '/usage', '/session', '/exit'].find(value => value.startsWith(this.draft.join('')));
+      const command = ['/commands', '/help', '/model', '/provider', '/usage', '/session', '/permission', '/exit'].find(value => value.startsWith(this.draft.join('')));
       if (command) { this.draft = chars(command + ' '); this.cursor = this.draft.length; this.schedule(); }
       return;
     }
@@ -274,17 +301,17 @@ export class TerminalUI {
     const inputBody = inputText || clip(placeholder, Math.max(1, width - 6));
     const border = (left, text, right) => clip(left + text + '─'.repeat(Math.max(0, width - cellWidth(left + text + right))) + right, width);
     const frame = [
-      line(`SWITCHYARD  /  ${this.opts.model}  ·  ${this.opts.provider}`, '1;96'),
+      line(`SWITCHYARD  /  ${this.opts.model}  ·  ${this.opts.provider}${this.opts.permission === 'yolo' ? '  ·  ⚠ YOLO MODE' : ''}`, this.opts.permission === 'yolo' ? '1;31' : '1;96'),
       muted('─'.repeat(width)),
       ...view, ...footer,
       line(status, this.busy ? '93' : '90'),
       muted(border('╭─ ', modal ? ' Permission ' : ' Message ', '╮')),
       muted('│ ') + paint('96', '› ') + (inputText ? inputBody : muted(inputBody)) + ' '.repeat(Math.max(0, width - cellWidth(inputBody) - 5)) + muted('│'),
       muted(border('╰', '', '╯')),
-      muted(clip(this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
+      muted(clip(this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /permission  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
     ];
     if (height < 8) {
-      frame.splice(0, frame.length, clip('Switchyard', width), ...Array.from({ length: height - 3 }, () => ''), clip(status, width), clip('> ' + inputText, width));
+      frame.splice(0, frame.length, clip(this.opts.permission === 'yolo' ? 'Switchyard · YOLO MODE' : 'Switchyard', width), ...Array.from({ length: height - 3 }, () => ''), clip(status, width), clip('> ' + inputText, width));
     }
     let out = '\x1b[?25l';
     for (let i = 0; i < frame.length; i++) if (frame[i] !== this.frames[i]) out += `\x1b[${i + 1};1H\x1b[2K${frame[i]}`;
@@ -300,7 +327,7 @@ export class TerminalUI {
     this.output.write = this.oldOut; this.error.write = this.oldErr;
     try { this.input.setRawMode(Boolean(this.oldRaw)); } catch {}
     if (this.oldPaused) this.input.pause();
-    this.rawWrite('\x1b[?2004l\x1b[?25h\x1b[?1049l');
+    this.rawWrite('\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l');
     for (const pending of this.confirmations) pending.resolve(false);
     if (this.waiter) this.waiter('/exit');
   }

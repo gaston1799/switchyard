@@ -10,6 +10,7 @@ export const CONNECTIONS = [
   { id: 'deepseek', label: 'DeepSeek', description: 'API key' },
   { id: 'glm', label: 'GLM / Z.AI', description: 'API key' },
   { id: 'openai', label: 'OpenAI GPT', description: 'API key · separate API billing' },
+  { id: 'reflection', label: 'Reflection AI', description: 'Beam · API key · beta' },
   { id: 'anthropic', label: 'Anthropic Claude', description: 'API key · separate API billing' }
 ];
 
@@ -83,6 +84,8 @@ export const SLASH_HELP = [
   '/model — choose a model for this connection',
   '/model <id> — select a model directly',
   '/provider — choose another API provider (API sessions)',
+  '/permission — change review, ask, full, or YOLO mode',
+  '/permission <mode> — change permissions during this session',
   '/usage — show usage and available account limits',
   '/session — show the session path and connection',
   '/exit — save and quit'

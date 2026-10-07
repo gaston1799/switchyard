@@ -8,7 +8,7 @@ import { clearLine, createInterface, cursorTo } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { deepSeekHttpError } from "./api-error.js";
 import { isRetryableFetchError, retryBackoffMs } from "./fetch-retry.js";
-import { configPath, getDeepSeekApiKey, getProviderApiKey, setProviderApiKey } from "./config.js";
+import { configPath, getDeepSeekApiKey, getProviderApiKey, readConfig, setProviderApiKey, writeConfig } from "./config.js";
 import { contextLimitFor, fetchProviderModels, hasKnownContextLimit, normalizeProvider, PROVIDERS, providerConfig } from "./providers.js";
 import { providerStream } from "./provider-transport.js";
 import { DEEPSEEK_TOP_UP_URL, getProviderBalance, isBelowMinimum } from "./provider-balance.js";
@@ -49,15 +49,18 @@ import {
   validateAgentId,
   waitForAgentMessages
 } from "./agent-coordination.js";
-import { discoverSkills, formatSkillList, renderLoadedSkills, resolveSkill, runSkillCommand, skillRootsWithSources, skillUsage } from "./skills.js";
+import { canonicalSkillRoot, discoverSkills, formatSkillList, installBundledSkill, renderLoadedSkills, resolveSkill, runSkillCommand, skillRootsWithSources, skillUsage } from "./skills.js";
 import { boundedSearch } from "./search.js";
 import { getArtifact, getArtifactIndex, listArtifacts, readArtifactRange, searchArtifact, searchArtifacts, writeArtifact } from "./artifacts.js";
 import { SANDBOX_ENVIRONMENTS, sandboxExecute, sandboxOperation } from "./sandbox.js";
 import { addScopeAssets, checkScope, decideEscalation, getEscalationPolicy, getScope, recordHypothesis, recordRoi, recordViability, removeScopeAssets, requireScope, setEscalationPolicy, setScope } from "./task-state.js";
 import { netCaptureStart, netCaptureStatus, netCaptureStop, netConversations, netExtractFields, netListInterfaces, netProtocolSummary, netQueryPcap, netStreamSummary } from "./net-tools.js";
 import { peTriage } from "./triage.js";
+import { resolveWorkspacePath } from "./workspace-paths.js";
+import { PERSONAL_SUPPORT_URL, personalSupportResponse, shouldPromptForPersonalSupport } from "./support-prompt.js";
 
 const DEFAULT_PROVIDER = "deepseek";
+let workspacePathPolicy = { permission: "ask", agentRole: "worker" };
 // __SYSTEM_PROMPT__ is replaced with the file's content by the exe build step (esbuild --define).
 // In normal dev/npm installs it is undefined and the file is read at runtime instead.
 const EMBEDDED_SYSTEM_PROMPT = typeof __SYSTEM_PROMPT__ !== "undefined" ? __SYSTEM_PROMPT__ : null;
@@ -97,9 +100,11 @@ Usage:
   switchyard config set-glm-key <key>
   switchyard config set-anthropic-key <key>
   switchyard config set-openai-key <key>
+  switchyard config set-reflection-key <key>
   switchyard config set-google-search-key <key>
   switchyard config set-google-search-engine-id <engine-id>
   switchyard config path
+  switchyard support            Open Gaston's personal support page
   switchyard -p <prompt> [options]
   switchyard --prompt-file <file> [options]
   switchyard --stdin [options]
@@ -120,11 +125,11 @@ Options:
   --list-skills                List discovered local skills and exit.
   --skill-root also selects the canonical DeepSeek root for switchyard skill install/create/remove/sync.
   --backend <api|codex|claude>  Execution engine; codex/claude use signed-in CLI accounts.
-  --provider <deepseek|glm|anthropic|openai>    Model provider. Default: deepseek
+  --provider <deepseek|glm|anthropic|openai|reflection>    Model provider. Default: deepseek
   --balance-fallback <provider> On HTTP 402, retry with this configured provider (for example: glm).
   --model <name>               Model (selected provider's default)
   --base-url <url>             Provider API base URL (provider default)
-  --effort <high|max>          Reasoning effort. Default: high
+  --effort <effort>            Reasoning effort; Reflection Beam accepts low|medium|high|xhigh|max
   --thinking <enabled|disabled>
                                Provider thinking toggle. Default: enabled
   --max-tokens <number>        Max output tokens. Default: 16384
@@ -135,8 +140,8 @@ Options:
   --max-tool-turns <number>    Max tool call loops. Default: unlimited
   --tool-mode <parallel|sequential>
                                parallel runs tool calls concurrently; sequential runs in order. Default: parallel
-  --permission <review|ask|full>
-                               Session permission level. review=read-only, ask=prompt for shell, full=auto-run shell.
+  --permission <review|ask|full|yolo>
+                               Session permission level. yolo auto-approves tools and commands.
   --allow-target <asset>        Seed reviewed task scope with an allowed domain or URL. Repeatable.
   --scope-file <file>           Seed reviewed task scope from a JSON file with allowed/excluded assets/classes.
   --session <file>             Session memory JSON file. Default: new timestamped session.
@@ -313,13 +318,16 @@ function validateOpts(opts) {
   }
   if (promptSources > 1) throw new Error("Use only one prompt source.");
   if (!["enabled", "disabled"].includes(opts.thinking)) throw new Error("--thinking must be enabled or disabled.");
-  if (!["high", "max"].includes(opts.effort)) throw new Error("--effort must be high or max.");
+  const validEfforts = normalizeProvider(opts.provider) === "reflection"
+    ? ["low", "medium", "high", "xhigh", "max"]
+    : ["high", "max"];
+  if (!validEfforts.includes(opts.effort)) throw new Error(`--effort must be ${validEfforts.join(" or ")} for ${normalizeProvider(opts.provider)}.`);
   if (!["parallel", "sequential"].includes(opts.toolMode)) throw new Error("--tool-mode must be parallel or sequential.");
   if (!Number.isInteger(opts.retryAttempts) || opts.retryAttempts < 0) throw new Error("--retry-attempts must be a non-negative integer (0 = retry forever).");
   if (!Number.isInteger(opts.retryDelay) || opts.retryDelay < 100) throw new Error("--retry-delay must be at least 100 ms.");
   if (!Number.isInteger(opts.retryMaxDelay) || opts.retryMaxDelay < opts.retryDelay) throw new Error("--retry-max-delay must be >= --retry-delay.");
   if (!Number.isFinite(opts.timeout) || opts.timeout <= 0) throw new Error("--timeout must be a positive number.");
-  if (opts.permission && !["review", "ask", "full"].includes(opts.permission)) throw new Error("--permission must be review, ask, or full.");
+  if (opts.permission && !["review", "ask", "full", "yolo"].includes(opts.permission)) throw new Error("--permission must be review, ask, full, or yolo.");
   if (opts.balanceFallbackProvider && opts.balanceFallbackProvider === opts.provider) throw new Error("--balance-fallback must name a different provider.");
   if (opts.resume && !opts.saveSession) throw new Error("--resume cannot be combined with --no-save-session.");
   if (opts.resume && opts.newSession) throw new Error("--resume and --new cannot be combined.");
@@ -440,6 +448,7 @@ function agentIdentityContext(opts) {
     `coordinator_id: ${opts.coordinatorId || "(unknown)"}`,
     `context_limit: ${opts.contextLimit || "auto"}`,
     `coordination_directory: ${opts.coordDir || "(not initialized)"}`,
+    ...(opts.permission === "yolo" && opts.agentRole === "coordinator" ? ["In YOLO mode, coordinator workspace path boundaries are disabled so you can coordinate across the workspace and related paths. Worker agents remain workspace-confined; task authorization scope still applies."] : []),
     "At the start of a worker session, announce yourself and your mission to coordinator_id with agent_send (type=status) before other coordination discovery. Do not call agent_list merely to announce when coordinator_id is known. If coordinator_id is unknown, use agent_list once to find the coordinator, then send the direct announcement. Use agent_task_list/agent_claim for bounded work, agent_handoff for results, and agent_wait only when you are ready to park until a message arrives. Treat scopes claimed by other agents as read-only unless they explicitly hand them off."
   ].join("\n");
 }
@@ -1513,7 +1522,7 @@ async function generateImageOpenAI(opts, args) {
   const output = assertInsideWorkspace(outputPath);
   const imageModel = String(args.image_model || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2.5-flare').trim();
   const hostModel = String(args.host_model || process.env.OPENAI_IMAGE_HOST_MODEL || (opts.provider === 'openai' ? opts.model : 'gpt-5')).trim();
-  if (opts.permission !== 'full' && !opts.dangerouslyAutoRunCommands) {
+  if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
     if (opts.noOutput) throw new Error('Image generation is blocked by no-output mode.');
     const approved = await askYesNo(`Generate an image through the billed OpenAI API and write ${outputPath}?`);
     if (!approved) return 'blocked by user';
@@ -1622,7 +1631,8 @@ async function pickPermission(opts) {
   return pickMenu(opts, "Permission level", "Choose what this session may do.", [
     { id: "review", label: (["codex", "claude"].includes(opts.backend) ? "Review - native read-only tools/sandbox" : "Review only - read files, no shell commands") },
     { id: "ask", label: (["codex", "claude"].includes(opts.backend) ? "Ask - native approval requests appear in Switchyard" : "Ask before commands - prompt for cmd/PowerShell") },
-    { id: "full", label: "Full access - auto-run cmd/PowerShell" }
+    { id: "full", label: "Full access - auto-run workspace actions" },
+    { id: "yolo", label: "YOLO mode - auto-approve all tool and command requests" }
   ]);
 }
 
@@ -1694,6 +1704,27 @@ async function dashboardOpts() {
         opts.model = model; opts.modelExplicit = true;
         opts.permission = await pickPermission(opts);
         if (opts.permission === "quit") continue;
+        if (opts.backend === "api") {
+          const role = await choose("Swarm role", "Choose how this API-backed session participates in the shared agent board.", [
+            { id: "coordinator", label: "Coordinator - plan, delegate, and review workers" },
+            { id: "worker", label: "Worker - take bounded tasks from a coordinator" }
+          ]);
+          if (!role) continue;
+          opts.agentRole = role;
+          opts.agentId = generateAgentId(role);
+          const defaultCoordDir = opts.coordDir || ".deepseek-watch/coordination";
+          const requestedCoordDir = String(await ask(`Shared coordination directory (blank for ${defaultCoordDir}; use the same absolute path for every worktree)`) || "").trim();
+          opts.coordDir = coordinationRoot(requestedCoordDir || defaultCoordDir);
+          if (role === "coordinator") {
+            opts.agentMission = String(await ask("Coordinator mission (optional; press Enter to skip)") || "").trim();
+          } else {
+            opts.coordinatorId = String(await ask("Coordinator ID (optional; blank lets the worker discover one)") || "").trim() || null;
+            opts.agentMission = String(await ask("Worker mission (optional; press Enter to skip)") || "").trim();
+          }
+          notice(`Swarm setup: ${role} · ${opts.agentId} · shared board ${opts.coordDir}`);
+        } else {
+          notice("Swarm roles are available for API-backed runs. Native Codex and Claude sessions use provider-owned tool loops and cannot join the Switchyard coordination board yet.");
+        }
       }
       opts.interactiveChat = true;
       return opts;
@@ -1894,8 +1925,21 @@ function toolSchemas(opts) {
       type: "function",
       function: {
         name: "list_skills",
-        description: "List local skills discovered from --skill-root, DEEPSEEK_SKILLS_DIR, ~/.deepseek/skills, ~/.codex/skills (fallback), and .deepseek-watch/skills, in precedence order. Read-only.",
+        description: "List local and Switchyard-bundled skills in precedence order. Bundled skills can be installed persistently with install_skill.",
         parameters: { type: "object", properties: {}, additionalProperties: false }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "install_skill",
+        description: "Install a named skill from Switchyard's bundled, trusted skill catalog into the persistent user skill directory. The skill is available to read_skill immediately; no session restart is needed. Only bundled skills can be installed through this tool.",
+        parameters: {
+          type: "object",
+          properties: { name: { type: "string", description: "Exact name of a skill listed by list_skills with source bundled." } },
+          required: ["name"],
+          additionalProperties: false
+        }
       }
     },
     {
@@ -3100,7 +3144,7 @@ function toolSchemas(opts) {
             prompt: { type: "string", description: "Initial prompt for the new agent." },
             provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Model provider for the new agent. Defaults to this agent's own provider. A model from one provider spawned against another's endpoint fails immediately, so set this whenever `model` is not from your own provider." },
             model: { type: "string", description: "Any model the chosen provider serves. Call list_models to see what is available; omitting it uses the provider default." },
-            permission: { type: "string", enum: ["review", "ask", "full"], description: "Default full." }
+            permission: { type: "string", enum: ["review", "ask", "full", "yolo"], description: "Default full." }
           },
           required: ["agent_id", "prompt"],
           additionalProperties: false
@@ -3120,7 +3164,7 @@ function toolSchemas(opts) {
             mission: { type: "string", description: "Optional mission override for this launch." },
             provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Provider for the resumed agent. Defaults to this agent's own provider." },
             model: { type: "string", description: "Any model the chosen provider serves. Call list_models to see what is available." },
-            permission: { type: "string", enum: ["review", "ask", "full"] }
+            permission: { type: "string", enum: ["review", "ask", "full", "yolo"] }
           },
           required: ["agent_id", "prompt"],
           additionalProperties: false
@@ -3148,6 +3192,7 @@ function toolSchemas(opts) {
     ? schemas.filter((schema, index) => index < reviewSchemaCount || schema.function?.name?.startsWith("agent_"))
     : schemas;
   available = available.filter(({ function: tool }) => {
+    if (tool.name === "install_skill" && opts.permission === "review") return false;
     if (tool.name === 'view_image') return caps.vision;
     if (tool.name === 'analyze_image_openai') return !caps.vision;
     if (tool.name === 'generate_image') return caps.imageGeneration && opts.permission !== 'review';
@@ -3156,6 +3201,33 @@ function toolSchemas(opts) {
   });
   if (opts.mcpManager) available.push(...opts.mcpManager.schemas(), ...opts.mcpManager.managementSchemas());
   return available;
+}
+
+function openPersonalSupportPage() {
+  const command = process.platform === "win32" ? "rundll32.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", PERSONAL_SUPPORT_URL] : [PERSONAL_SUPPORT_URL];
+  const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+  child.on("error", () => {});
+  child.unref();
+}
+
+async function maybePromptPersonalSupport(opts) {
+  if (process.env.SWITCHYARD_NO_SUPPORT_PROMPT === "1") return;
+  if (!opts.interactiveChat || opts.noOutput || opts.tuiQuiet || !process.stdin.isTTY || !process.stdout.isTTY) return;
+  let config;
+  try { config = await readConfig(); } catch { return; }
+  const saved = config.personalSupportPrompt || {};
+  if (!shouldPromptForPersonalSupport(saved)) return;
+  const choice = await pickMenu(opts, "Support Gaston's work", "Optional: help fund the tools and projects on my personal portfolio.", [
+    { id: "open", label: "Sure - open my personal support page", description: "GitHub Sponsors and Ko-fi" },
+    { id: "donated", label: "I already donated" },
+    { id: "later", label: "Ask me later" }
+  ]);
+  if (choice === "quit") return;
+  config.personalSupportPrompt = personalSupportResponse(choice);
+  try { await writeConfig(config); }
+  catch (error) { process.stderr.write(`Could not save the support reminder choice: ${error.message}\n`); }
+  if (choice === "open") openPersonalSupportPage();
 }
 
 async function manageMcpServers(ask = promptLine, choose = null, notice = message => process.stdout.write(`${message}\n`)) {
@@ -3325,14 +3397,7 @@ function resolveGitScope(rawPath) {
 }
 
 function assertInsideWorkspace(path) {
-  const root = resolve(process.cwd());
-  const localPath = path === "/" || path === "\\" ? "." : path;
-  const target = resolve(root, localPath || ".");
-  const rel = relative(root, target);
-  if (rel === ".." || rel.startsWith(`..\\`) || rel.startsWith("../") || isAbsolute(rel)) {
-    throw new Error("Path escapes workspace.");
-  }
-  return target;
+  return resolveWorkspacePath(process.cwd(), path, workspacePathPolicy);
 }
 
 function askYesNo(question) {
@@ -3950,6 +4015,7 @@ function resolveShellCwd(value) {
   if (!value) return resolve(process.cwd());
   const text = String(value).trim();
   if (!text) return resolve(process.cwd());
+  if (workspacePathPolicy.permission === "yolo" && workspacePathPolicy.agentRole === "worker") return assertInsideWorkspace(text);
   return isAbsolute(text) ? resolve(text) : assertInsideWorkspace(text);
 }
 
@@ -3958,7 +4024,7 @@ async function maybeRunShellTool(opts, shellName, command, timeoutMs, cwd = proc
   if (!command || typeof command !== "string") return "command error: command must be a non-empty string";
   if (opts.permission === "review") return "blocked by session permission: review only";
 
-  if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+  if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
     if (opts.noOutput) return "blocked by no-output mode";
     const ok = await askYesNo(`Allow ${shellName} command?\n${command}\n`);
     if (!ok) return "blocked by user";
@@ -4190,7 +4256,7 @@ async function runTool(opts, name, args) {
     const action = String(args.action || "get").toLowerCase();
     if (["set", "delete"].includes(action)) {
       if (opts.permission === "review") return "blocked by session permission: review only";
-      if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+      if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
         if (opts.noOutput) return "blocked by no-output mode";
         const ok = await askYesNo(`${action === "set" ? "Store" : "Delete"} project memory key '${String(args.key || "")}'?`);
         if (!ok) return "blocked by user";
@@ -4201,7 +4267,7 @@ async function runTool(opts, name, args) {
 
   if (name === "diagnostics" || name === "run_tests") {
     if (opts.permission === "review") return "blocked by session permission: review only";
-    if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
       if (opts.noOutput) return "blocked by no-output mode";
       const scripts = name === "diagnostics" ? "lint, typecheck, and check" : "test";
       const ok = await askYesNo(`Run configured npm ${scripts} script(s)?`);
@@ -4223,7 +4289,7 @@ async function runTool(opts, name, args) {
     const action = String(args.action || "list").toLowerCase();
     if (["start", "stop"].includes(action)) {
       if (opts.permission === "review") return "blocked by session permission: review only";
-      if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+      if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
         if (opts.noOutput) return "blocked by no-output mode";
         const detail = action === "start" ? `\nCommand: ${String(args.command || "")}` : "";
         const ok = await askYesNo(`${action === "start" ? "Start" : "Stop"} managed process '${String(args.name || "")}'?${detail}`);
@@ -4367,7 +4433,7 @@ async function runTool(opts, name, args) {
     const promptInfo = await stat(promptPath);
     if (!promptInfo.isFile()) throw new Error("prompt_file is not a file.");
     if (await pathExistsAbs(outputPath)) throw new Error("output_file already exists; remove it or choose a fresh output file.");
-    if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
       if (opts.noOutput) return "blocked by no-output mode";
       const ok = await askYesNo(`Start handoff?\nPrompt: ${args.prompt_file}\nOutput: ${args.output_file}\nLog: ${args.log_file}`);
       if (!ok) return "blocked by user";
@@ -4531,6 +4597,16 @@ async function runTool(opts, name, args) {
     return formatSkillList(await discoverSkills(opts));
   }
 
+  if (name === "install_skill") {
+    if (opts.permission === "review") return "blocked by session permission: review only";
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
+      if (opts.noOutput) return "blocked by no-output mode";
+      const ok = await askYesNo(`Install bundled skill ${args.name} to ${canonicalSkillRoot(opts)}?`);
+      if (!ok) return "blocked by user";
+    }
+    return installBundledSkill(opts, args.name);
+  }
+
   if (name === "read_skill") {
     const skill = await resolveSkill(opts, args.name);
     return [
@@ -4545,7 +4621,7 @@ async function runTool(opts, name, args) {
     if (opts.permission === "review") return "blocked by session permission: review only";
     const target = assertInsideWorkspace(args.path);
     if (typeof args.content !== "string") throw new Error("content must be a string.");
-    if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
       if (opts.noOutput) return "blocked by no-output mode";
       let exists = false;
       try { await stat(target); exists = true; } catch {}
@@ -4642,7 +4718,7 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
     const replaceAll = args.replace_all === true;
     const patched = patchEolTolerant(content, args.old_string, args.new_string, { replaceAll });
     if (!patched) throw new Error("old_string not found in file.");
-    if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
       if (opts.noOutput) return "blocked by no-output mode";
       const preview = args.old_string.slice(0, 120);
       const ok = await askYesNo(`Patch ${args.path}?\nReplace: ${preview}${args.old_string.length > 120 ? "…" : ""}`);
@@ -4721,7 +4797,7 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
       contextChars: args.context_chars,
       regexTimeoutMs: args.regex_timeout_ms,
       pageToken: args.page_token,
-      allowExternal: opts.permission === "full"
+      allowExternal: opts.permission === "full" || (opts.permission === "yolo" && opts.agentRole === "coordinator")
     }));
   }
 
@@ -4888,7 +4964,7 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
     if (failures.length) {
       return `Preflight failed — no files written:\n${failures.map((f) => `  ${f.path}: ${f.error}`).join("\n")}`;
     }
-    if (opts.permission !== "full" && !opts.dangerouslyAutoRunCommands) {
+    if (!["full", "yolo"].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
       if (opts.noOutput) return "blocked by no-output mode";
       const preview = edits.map((e) => `  ${e.path}: ${e.old_string.slice(0, 60)}${e.old_string.length > 60 ? "…" : ""}`).join("\n");
       const ok = await askYesNo(`Patch ${edits.length} file${edits.length !== 1 ? "s" : ""}?\n${preview}`);
@@ -5239,7 +5315,7 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
             phase = "thinking";
           }
           reasoningContent += delta.reasoning_content;
-          if (!opts.noOutput) reasoningWriter.write(delta.reasoning_content);
+          if (!opts.noOutput && opts.thinking !== 'disabled') reasoningWriter.write(delta.reasoning_content);
         }
 
         if (delta.content) {
@@ -6142,6 +6218,32 @@ async function handleApiSlash(opts, session, text) {
   };
   try {
     if (["help", "commands"].includes(command.name)) notice(SLASH_HELP);
+    else if (command.name === "permission") {
+      const valid = ["review", "ask", "full", "yolo"];
+      const next = command.argument ? command.argument.toLowerCase() : await choose("Permission level", "Changes apply to the next model turn.", [
+        { id: "review", label: "Review only - read-only" },
+        { id: "ask", label: "Ask - confirm commands and MCP changes" },
+        { id: "full", label: "Full access - auto-run workspace actions" },
+        { id: "yolo", label: "YOLO mode - auto-approve tool and command requests" }
+      ]);
+      if (!next) return true;
+      if (!valid.includes(next)) throw new Error("Use /permission review|ask|full|yolo.");
+      const previous = opts.permission;
+      if (previous === next) { notice(`Permission is already ${next}.`); return true; }
+      opts.permission = next;
+      opts.dangerouslyAutoRunCommands = ["full", "yolo"].includes(next);
+      workspacePathPolicy = { permission: next, agentRole: opts.agentRole };
+      opts.mcpManager?.setPermission?.(next);
+      session.config.permission = next;
+      const pathPolicy = next === "yolo" && opts.agentRole === "coordinator"
+        ? "Coordinator workspace path boundaries are disabled; worker path boundaries and task-scope checks remain active."
+        : "Task-scope and workspace path safeguards remain active.";
+      const event = `[Switchyard permission changed: ${previous} → ${next}. ${next === "yolo" ? "Tool and command approval prompts are automatically accepted." : `Permission mode is now ${next}.`} ${pathPolicy}]`;
+      session.messages.push({ role: "user", content: event });
+      if (opts.ui) opts.ui.add("user", event);
+      else process.stdout.write(`${event}\n`);
+      if (opts.saveSession) await writeSession(opts.session, touchSession(session));
+    }
     else if (command.name === "session") notice(`API · ${opts.provider} / ${opts.model}\n${sessionPath(opts.session)}`);
     else if (command.name === "usage") notice(`Context estimate: ${estimateContextTokens(session.messages).toLocaleString()} tokens\n${opts.ui?.usage ? JSON.stringify(opts.ui.usage) : "No response usage reported yet."}`);
     else if (["model", "provider"].includes(command.name)) {
@@ -6182,6 +6284,7 @@ async function runMcpCommand(args) {
 
 async function run() {
   const argv = process.argv.slice(2);
+  if (argv[0] === "support") { openPersonalSupportPage(); process.stdout.write(`Opening ${PERSONAL_SUPPORT_URL}\n`); return; }
   if (["login", "auth"].includes(argv[0])) {
     if (!["codex", "claude"].includes(argv[1])) throw new Error("Usage: switchyard login|auth codex|claude");
     await nativeAuth(argv[1], argv[0] === "login" ? "login" : "status");
@@ -6269,7 +6372,7 @@ async function run() {
 
   if (argv[0] === "config") {
     const command = argv[1];
-    if (["set-key", "set-glm-key", "set-anthropic-key", "set-claude-key", "set-openai-key"].includes(command)) {
+    if (command === 'set-key' || (typeof command === 'string' && command.startsWith('set-') && command.endsWith('-key'))) {
       const provider = command === "set-key" ? "deepseek" : normalizeProvider(command.slice(4, -4));
       await setProviderApiKey(provider, argv[2] || "");
       process.stdout.write(`Saved ${providerConfig(provider).label} API key to ${configPath()}\n`);
@@ -6287,7 +6390,7 @@ async function run() {
       process.stdout.write(`${configPath()}\n`);
       return;
     }
-    throw new Error("Unknown config command. Use: switchyard config set-key <key>, switchyard config set-glm-key <key>, switchyard config set-anthropic-key <key>, switchyard config set-openai-key <key>, switchyard config set-google-search-key <key>, or switchyard config set-google-search-engine-id <engine-id>");
+    throw new Error("Unknown config command. Use: switchyard config set-key <key>, switchyard config set-glm-key <key>, switchyard config set-anthropic-key <key>, switchyard config set-openai-key <key>, switchyard config set-reflection-key <key>, switchyard config set-google-search-key <key>, or switchyard config set-google-search-engine-id <engine-id>");
   }
 
   const opts = argv.length === 0 ? await dashboardOpts() : parseArgs(argv);
@@ -6299,6 +6402,7 @@ async function run() {
     await maybePromptUpdate(opts);
     if (opts.quit) return;
   }
+  await maybePromptPersonalSupport(opts);
 
   if (opts.interactiveChat && !opts.quit && process.stdout.isTTY) {
     const cwdName = String(process.cwd()).split(/[\\/]/).filter(Boolean).pop() || "workspace";
@@ -6380,6 +6484,9 @@ async function run() {
   }
 
   opts.agentRole = String(opts.agentRole || resumedSession?.config?.agentRole || "worker").trim().toLowerCase() || "worker";
+  opts.permission = opts.permission || resumedSession?.config?.permission || (opts.dangerouslyAutoRunCommands ? "full" : "ask");
+  if (["full", "yolo"].includes(opts.permission)) opts.dangerouslyAutoRunCommands = true;
+  workspacePathPolicy = { permission: opts.permission, agentRole: opts.agentRole };
   opts.agentMission = String(opts.agentMission || resumedSession?.config?.agentMission || "").trim();
   opts.agentId = validateAgentId(opts.agentId || resumedSession?.config?.agentId || generateAgentId(opts.agentRole));
   opts.coordDir = coordinationRoot(opts.coordDir || resumedSession?.config?.coordDir);
@@ -6446,8 +6553,9 @@ async function run() {
   }
 
   opts.permission = opts.permission || session.config?.permission || (opts.dangerouslyAutoRunCommands ? "full" : "ask");
+  workspacePathPolicy = { permission: opts.permission, agentRole: opts.agentRole };
   opts.toolMode = opts.toolMode || session.config?.toolMode || "parallel";
-  if (opts.permission === "full") opts.dangerouslyAutoRunCommands = true;
+  if (["full", "yolo"].includes(opts.permission)) opts.dangerouslyAutoRunCommands = true;
   session.config = {
     ...(session.config || {}),
     provider: opts.provider,

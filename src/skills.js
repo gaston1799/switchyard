@@ -14,6 +14,16 @@ import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const STANDALONE = typeof __SWITCHYARD_STANDALONE__ !== "undefined" && __SWITCHYARD_STANDALONE__;
+
+// Skills ship beside SEA executables, and beside the source package in dev/npm installs.
+export function bundledSkillsRoot() {
+  return STANDALONE
+    ? join(dirname(process.execPath), "skills")
+    : resolve(dirname(fileURLToPath(import.meta.url)), "..", "skills");
+}
 
 export function deepseekSkillsRoot() {
   return join(homedir(), ".deepseek", "skills");
@@ -36,7 +46,8 @@ export function skillRootsWithSources(opts = {}) {
       : []),
     { root: deepseekSkillsRoot(), source: "deepseek" },
     { root: codexSkillsRoot(), source: "codex" },
-    { root: workspaceSkillsRoot(), source: "workspace" }
+    { root: workspaceSkillsRoot(), source: "workspace" },
+    { root: bundledSkillsRoot(), source: "bundled" }
   ];
   const seen = new Set();
   const result = [];
@@ -412,6 +423,21 @@ export async function skillInstall(opts, spec) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+// Model-facing installation is intentionally limited to Switchyard's shipped
+// catalog. Arbitrary paths and GitHub repositories remain explicit CLI actions.
+export async function installBundledSkill(opts, name) {
+  const requested = String(name || "").trim();
+  if (!isValidSkillName(requested)) throw new Error(`Invalid skill name: ${requested}`);
+  const root = bundledSkillsRoot();
+  const entries = await readSkillDirs(root);
+  const skill = entries.find((entry) => entry.name === requested || basename(entry.dir) === requested);
+  if (!skill) {
+    const choices = entries.map((entry) => entry.name).sort().join(", ") || "(none bundled)";
+    throw new Error(`No bundled skill named ${requested}. Available bundled skills: ${choices}`);
+  }
+  return skillInstall(opts, skill.dir);
 }
 
 export async function skillRemove(opts, name) {

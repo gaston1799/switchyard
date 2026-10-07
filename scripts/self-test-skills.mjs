@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Self-test for the DeepSeek skills system (src/skills.js):
 //   - frontmatter parsing + malformed SKILL.md handling
-//   - discovery precedence (flag > env > ~/.deepseek/skills > ~/.codex/skills > workspace)
+//   - discovery precedence (flag > env > user roots > workspace > bundled)
 //   - install / create / remove / sync round-trip
 //   - migrate-from-codex (never mutates ~/.codex/skills)
 //   - a skill added mid-session is picked up on the next discovery (no cache)
@@ -123,6 +123,13 @@ await checkAsync("precedence: DEEPSEEK_SKILLS_DIR beats deepseek root", async ()
   assert.equal(alpha.source, "env");
   delete process.env.DEEPSEEK_SKILLS_DIR;
 });
+await checkAsync("bundled catalog: repo skills are discoverable even when not installed globally", async () => {
+  const list = await skills.discoverSkills({});
+  const found = list.find((skill) => skill.name === "dsw-bounded-analysis");
+  assert.ok(found, "expected dsw-bounded-analysis in bundled skills catalog");
+  assert.equal(found.source, "bundled");
+  assert.match((await skills.resolveSkill({}, found.name)).content, /bounded/i);
+});
 
 // ---------- 3. malformed handling ----------
 await writeSkill(deepseekRoot(), "bad", "---\nname: bad\n(unterminated");
@@ -150,6 +157,14 @@ await checkAsync("install: resolves a workspace skill by name into the target ro
   assert.ok(existsSync(targetFile), result);
   const text = await readFile(targetFile, "utf8");
   assert.match(text, /workspace-only/);
+});
+await checkAsync("install: model-facing bundled installer persists a catalog skill", async () => {
+  const result = await skills.installBundledSkill({ skillRoots: [targetRoot] }, "dsw-bounded-analysis");
+  assert.match(result, /Installed 1 skill/);
+  assert.ok(existsSync(join(targetRoot, "dsw-bounded-analysis", "SKILL.md")));
+});
+await checkAsync("install: bundled installer rejects names outside the shipped catalog", async () => {
+  await assert.rejects(() => skills.installBundledSkill({ skillRoots: [targetRoot] }, "not-a-bundled-skill"), /No bundled skill named/);
 });
 await checkAsync("install: re-installing an existing skill is idempotent", async () => {
   const result = await skills.skillInstall({ skillRoots: [targetRoot] }, "gamma");

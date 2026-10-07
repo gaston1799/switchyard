@@ -15,14 +15,18 @@
  */
 
 import { execSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import rcedit from "rcedit";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(ROOT, "dist", "exe");
+const VERSION = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")).version;
 mkdirSync(DIST, { recursive: true });
+cpSync(resolve(ROOT, "skills"), resolve(DIST, "skills"), { recursive: true, force: true });
+for (const asset of ["icon.ico", "icon.png", "icon.svg"]) copyFileSync(resolve(ROOT, asset), resolve(DIST, asset));
 
 const FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 const NODE_EXE = process.execPath;
@@ -59,7 +63,8 @@ for (const { name, src } of ENTRIES) {
     external: ["node:*"],
     define: {
       __SYSTEM_PROMPT__: JSON.stringify(systemPrompt),
-      __UI_APP_DIR__: JSON.stringify(resolve(ROOT, "src", "ui"))
+      __UI_APP_DIR__: JSON.stringify(resolve(ROOT, "src", "ui")),
+      __SWITCHYARD_STANDALONE__: "true"
     },
     outfile: cjs
   });
@@ -76,6 +81,18 @@ for (const { name, src } of ENTRIES) {
 
   // 3. Copy node.exe as the base
   copyFileSync(NODE_EXE, exe);
+
+  if (name === "switchyard") {
+    await rcedit(exe, {
+      icon: resolve(ROOT, "icon.ico"),
+      "version-string": {
+        ProductName: "Switchyard",
+        FileDescription: "Switchyard AI harness"
+      },
+      "file-version": VERSION,
+      "product-version": VERSION
+    });
+  }
 
   // 4. Inject blob
   run(

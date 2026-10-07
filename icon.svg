@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Switchyard</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171a21"/>
+      <stop offset="1" stop-color="#0f1115"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- tile -->
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#bg)"/>
+  <rect x="44" y="44" width="936" height="936" rx="208" fill="none" stroke="#303746" stroke-width="8"/>
+
+  <!-- TUI prompt frame: ╭─ ─╮ top border echoing the input box -->
+  <path d="M170 250 H250 M774 250 H854" stroke="#303746" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- sleepers (rail ties) along the trunk -->
+  <g stroke="#303746" stroke-width="14" stroke-linecap="round">
+    <path d="M214 470 V554"/><path d="M262 470 V554"/><path d="M310 470 V554"/>
+  </g>
+
+  <!-- trunk: prompt chevron entering the yard -->
+  <path d="M190 512 H470" stroke="#47c2ff" stroke-width="44" stroke-linecap="round" fill="none"/>
+
+  <!-- switch point -->
+  <circle cx="500" cy="512" r="46" fill="#0f1115" stroke="#47c2ff" stroke-width="22"/>
+  <circle cx="500" cy="512" r="14" fill="#47c2ff"/>
+
+  <!-- diverging tracks: three providers/agents -->
+  <g fill="none" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M556 512 C650 512 656 330 760 330 H834" stroke="#6ee7a8"/>
+    <path d="M556 512 H834" stroke="#47c2ff"/>
+    <path d="M556 512 C650 512 656 694 760 694 H834" stroke="#ffd36a"/>
+  </g>
+
+  <!-- track end stops -->
+  <g>
+    <circle cx="858" cy="330" r="22" fill="#6ee7a8"/>
+    <circle cx="858" cy="512" r="22" fill="#47c2ff"/>
+    <circle cx="858" cy="694" r="22" fill="#ffd36a"/>
+  </g>
+
+  <!-- bottom prompt cursor: › _ -->
+  <path d="M170 800 L214 830 L170 860" stroke="#47c2ff" stroke-width="22" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="246" y="846" width="64" height="18" rx="9" fill="#9aa4b2"/>
+</svg>

@@ -23,7 +23,7 @@ Options:
   --prompt-file <file>      Read prompt content from a file.
   --stdin                   Read prompt content from stdin.
   -o, --output <file>       Markdown output file. Default: ${DEFAULT_OUTPUT}
-  --provider <deepseek|glm|anthropic|openai> Model provider. Default: deepseek
+  --provider <deepseek|glm|anthropic|openai|reflection> Model provider. Default: deepseek
   --model <name>            Model (provider default)
   --base-url <url>          OpenAI-compatible base URL (provider default)
   --effort <high|max>       Reasoning effort. Default: high

@@ -47,7 +47,7 @@ class NativeBackend extends EventEmitter {
     if (!reasoning) this.messages.set(id, (this.messages.get(id) || '') + text);
     this.emit('delta', { id, text, reasoning });
   }
-  async confirm(question) { return this.opts.permission !== 'review' && Boolean(await this.interaction.confirm?.(question)); }
+  async confirm(question) { if (this.opts.permission === 'yolo') return true; return this.opts.permission !== 'review' && Boolean(await this.interaction.confirm?.(question)); }
   budgetText() { return budgetPrompt(this.budget || unavailableBudget(this.opts.backend)); }
   async close() { await this.rpc?.close(); }
 }
@@ -62,8 +62,8 @@ export class CodexBackend extends NativeBackend {
     this.emit('account', { label: `ChatGPT ${account.planType || ''}`.trim() });
     const config = {
       cwd: this.opts.cwd, modelProvider: 'openai',
-      approvalPolicy: this.opts.permission === 'full' ? 'never' : this.opts.permission === 'review' ? 'never' : 'untrusted',
-      sandbox: this.opts.permission === 'full' ? 'danger-full-access' : 'read-only',
+      approvalPolicy: ['full', 'yolo'].includes(this.opts.permission) ? 'never' : this.opts.permission === 'review' ? 'never' : 'untrusted',
+      sandbox: ['full', 'yolo'].includes(this.opts.permission) ? 'danger-full-access' : 'read-only',
       ...(this.opts.model ? { model: this.opts.model } : {}),
       ...(this.opts.system ? { developerInstructions: this.opts.system } : {})
     };
@@ -157,7 +157,7 @@ export class ClaudeBackend extends NativeBackend {
     if (this.state.id) args.push('--resume', this.state.id);
     if (this.opts.model) args.push('--model', this.opts.model);
     if (this.opts.system) args.push('--append-system-prompt', this.opts.system);
-    if (this.opts.permission === 'full') args.push('--permission-mode', 'bypassPermissions');
+    if (['full', 'yolo'].includes(this.opts.permission)) args.push('--permission-mode', 'bypassPermissions');
     else if (this.opts.permission === 'review') args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Glob,Grep', '--strict-mcp-config');
     else args.push('--permission-mode', 'manual');
     this.attach(new JsonProcess('claude', args, { cwd: this.opts.cwd }));

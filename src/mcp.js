@@ -97,7 +97,8 @@ async function connectClient(name, server) {
   }
 }
 
-export async function createMcpManager({ permission = "ask", approve = async () => false, onNotice = () => {} } = {}) {
+export async function createMcpManager({ permission: initialPermission = "ask", approve = async () => false, onNotice = () => {} } = {}) {
+  let permission = initialPermission;
   const manager = { connections: new Map(), tools: new Map(), servers: new Map(), async close() {
     await Promise.allSettled([...this.connections.values()].map(({ client, transport }) => client.close().catch(() => transport.close().catch(() => {}))));
     this.connections.clear(); this.tools.clear(); this.servers.clear();
@@ -195,6 +196,9 @@ export async function createMcpManager({ permission = "ask", approve = async () 
       return `Removed MCP server ${serverName}. Its tools are no longer available.`;
     }
     throw new Error(`Unknown MCP management tool: ${name}`);
+  }, setPermission(value) {
+    if (!["review", "ask", "full", "yolo"].includes(value)) throw new Error("Invalid MCP permission mode.");
+    permission = value;
   }, isManagement(name) { return ["mcp_server_list", "mcp_server_add", "mcp_server_remove"].includes(name); } };
   const servers = await getMcpServers();
   for (const [rawName, config] of Object.entries(servers)) {

@@ -108,7 +108,7 @@ function compatibleChatMessages(messages, provider, model) {
     output.push({ role: message.role, content: media ? message.content.text : message.content ?? '',
       ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
       ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}),
-      ...(message.reasoning_content && provider === 'deepseek' ? { reasoning_content: message.reasoning_content } : {}) });
+      ...(message.reasoning_content && ['deepseek', 'reflection'].includes(provider) ? { reasoning_content: message.reasoning_content } : {}) });
     if (media && message.content.images.some(image => image.data) && modelCapabilities(provider, model).vision) {
       pendingImages.push(
         { type: 'text', text: message.content.text || 'Image returned by the preceding tool call.' },
@@ -152,7 +152,11 @@ export function buildProviderRequest(opts, messages, { apiKey, stream = false, t
     endpoint = "chat/completions";
     body = { model, stream, max_tokens: opts.maxTokens || 16384,
       messages: compatibleChatMessages(messages, provider, model) };
-    applyThinkingOptions(body, opts);
+    if (provider === 'reflection') {
+      // Beam always reasons; low is the supported minimum when the user turns
+      // visible reasoning off. The runtime still controls whether it is shown.
+      body.reasoning_effort = opts.thinking === 'disabled' ? 'low' : (opts.effort || 'medium');
+    } else applyThinkingOptions(body, opts);
     if (stream) body.stream_options = { include_usage: true };
     if (tools.length) body.tools = tools;
   }

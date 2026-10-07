@@ -1,5 +1,30 @@
 # Switchyard releases
 
+## v0.3.2 — 2026-10-07
+
+This patch release expands provider and agent setup, tightens permission handling,
+and improves the terminal and Windows install experience.
+
+### Added
+
+- Reflection AI Beam provider support and broader model pricing metadata.
+- YOLO permission mode, permission changes during a session, and clearer
+  coordinator/worker setup for API-backed swarms.
+- Bundled skill discovery and installation during an active session, plus
+  coordinator-safe workspace path handling.
+- Optional reminders linking to the maintainer's personal support page.
+- Three-row mouse-wheel scrolling in the terminal UI; Page Up/Down remain
+  page-sized.
+- A Switchyard Start Menu shortcut with the branded icon, created by the
+  Windows installer and quick-install script.
+
+### Improved
+
+- MCP setup and permission updates, provider-aware image/tool behavior, native
+  backend handling, and the Electron interface.
+- Pricing display for cached and cache-write tokens, unknown prices, and
+  provider aliases.
+
 ## v0.3.0 — 2026-09-21
 
 The Switchyard rebrand brings a shared terminal interface to DeepSeek, GLM,

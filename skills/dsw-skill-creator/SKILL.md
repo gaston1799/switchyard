@@ -8,7 +8,8 @@ description: How to create and register local skills for the dsw harness so futu
 Skills are `SKILL.md` files the dsw harness discovers at session start.
 
 ## Where skills live (all auto-discovered)
-- Harness repo: `skills/<name>/SKILL.md` — version-controlled; `scripts/rebuild-shims.ps1` copies these to `~/.codex/skills/`
+- Harness repo: `skills/<name>/SKILL.md` — version-controlled and discovered from the bundled catalog by source installs and packaged executables
+- Persistent user install: `~/.deepseek/skills/<name>/SKILL.md`
 - Global (always found): `~/.codex/skills/<name>/SKILL.md`
 - Workspace (cwd-relative): `.deepseek-watch/skills/<name>/SKILL.md`
 - Extra roots via `--skill-root <dir>` or `DEEPSEEK_SKILLS_DIR`
@@ -37,6 +38,6 @@ Concise, actionable body: purpose, commands, examples, gotchas. No fluff.
 ## Steps
 1. Create `skills/<name>/SKILL.md` in the harness repo
 2. Write the file with the frontmatter above
-3. Run `scripts/rebuild-shims.ps1` to install it to `~/.codex/skills/`
-4. Verify with `dsw --list-skills`
-5. In-session: call the `list_skills` tool to see it, `read_skill <name>` to read it, or start a session with `--skill <name>` to inject it into the system prompt
+3. Verify with `switchyard --list-skills`; bundled skills are available without copying them globally
+4. To persist a bundled skill for later sessions, use `switchyard skill install <name>` or the in-session `install_skill` tool. The latter only installs from Switchyard's bundled catalog and asks first in `ask` permission mode.
+5. In-session: call `list_skills` to see skills and `read_skill <name>` to load one immediately; no restart is required after installation.

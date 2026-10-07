@@ -188,6 +188,36 @@ foreach ($alias in $aliases) {
   }
 }
 
+$BundledSkills = Join-Path $repoDir "dist\exe\skills"
+if (Test-Path $BundledSkills) {
+  Copy-Item $BundledSkills (Join-Path $ExeDir "skills") -Recurse -Force
+  Write-Ok "Bundled skills"
+} else {
+  Write-Warn "Bundled skills directory not found in dist\exe."
+}
+
+# Register a Start Menu app entry so Windows Search displays Switchyard's icon
+# instead of treating the npm-generated command shim as a generic script.
+$IconSrc = Join-Path $repoDir "icon.ico"
+$IconDest = Join-Path $ExeDir "icon.ico"
+$SwitchyardExe = Join-Path $ExeDir "switchyard.exe"
+if ((Test-Path $SwitchyardExe) -and (Test-Path $IconSrc)) {
+  Copy-Item $IconSrc $IconDest -Force
+  $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+  New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
+  $ShortcutPath = Join-Path $StartMenu "Switchyard.lnk"
+  $Shell = New-Object -ComObject WScript.Shell
+  $Shortcut = $Shell.CreateShortcut($ShortcutPath)
+  $Shortcut.TargetPath = $SwitchyardExe
+  $Shortcut.WorkingDirectory = $env:USERPROFILE
+  $Shortcut.IconLocation = "$IconDest,0"
+  $Shortcut.Description = "Switchyard AI agent harness"
+  $Shortcut.Save()
+  Write-Ok "Start Menu shortcut with Switchyard icon"
+} else {
+  Write-Warn "Switchyard executable or icon missing; skipping Start Menu shortcut."
+}
+
 # Add ExeDir to the user PATH (persistent, via registry)
 Write-Step "Updating user PATH..."
 $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")

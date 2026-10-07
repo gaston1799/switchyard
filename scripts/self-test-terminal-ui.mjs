@@ -66,6 +66,19 @@ test('scrolled history remains anchored as output grows', t => {
   ui.render(); ui.key('', { name: 'pageup' }); ui.render(); const before = ui.frames.slice(2, -5);
   ui.add('assistant', 'new output'); ui.render(); assert.deepEqual(ui.frames.slice(2, -5), before);
 });
+test('mouse wheel scrolls three rows while PageUp and PageDown remain page sized', t => {
+  const { ui, input, output, bytes } = fixture(t);
+  for (let i = 0; i < 80; i++) ui.add('user', `message ${i}`);
+  ui.render();
+  assert.ok(bytes().includes('\x1b[?1000h\x1b[?1006h'));
+  input.write(Buffer.from([27, 91, 60, 54, 52, 59, 50, 48, 59, 56, 77]));
+  assert.equal(ui.offset, 3); assert.equal(ui.draft.join(''), '');
+  input.write(Buffer.from([27, 91, 60, 54, 53, 59, 50, 48, 59, 56, 77]));
+  assert.equal(ui.offset, 0); assert.equal(ui.draft.join(''), '');
+  ui.key('', { name: 'pageup' }); assert.equal(ui.offset, output.rows - 8);
+  ui.key('', { name: 'pagedown' }); assert.equal(ui.offset, 0);
+  ui.close(); assert.ok(bytes().includes('\x1b[?1006l\x1b[?1000l'));
+});
 test('close restores stream writers, raw mode and alternate screen', t => {
   const { ui, input, output, error, write, bytes } = fixture(t);
   error.write('diagnostic'); assert.equal(ui.entries.at(-1).text, 'diagnostic');
@@ -90,7 +103,7 @@ test('CLI streams, processes a queued follow-up, saves it and restores terminal'
   t.after(() => { server.closeAllConnections(); server.close(); child?.kill(); });
   const cli = new URL('../src/deepseek-watch.js', import.meta.url).href;
   const bootstrap = `Object.defineProperty(process.stdin,'isTTY',{value:true}); Object.defineProperty(process.stdout,'isTTY',{value:true}); process.stdin.setRawMode = v => {process.stdin.isRaw=v}; process.argv=['node','watch',...process.argv.slice(1)]; await import(${JSON.stringify(cli)});`;
-  child = spawn(process.execPath, ['--input-type=module', '-e', bootstrap, '--', '--no-update-check', '--tui', '-p', 'hello', '--provider', 'deepseek', '--base-url', `http://127.0.0.1:${server.address().port}`, '--no-tools', '--session', join(dir, 'session.json'), '--coord-dir', join(dir, 'coord'), '--agent-id', 'tui-test', '--retry-attempts', '1'], { cwd: dir, windowsHide: true, env: { ...process.env, DEEPSEEK_API_KEY: 'mock-key', DEEPSEEK_TUI_QUIET: '0', TERM: 'xterm-256color' } });
+  child = spawn(process.execPath, ['--input-type=module', '-e', bootstrap, '--', '--no-update-check', '--tui', '-p', 'hello', '--provider', 'deepseek', '--base-url', `http://127.0.0.1:${server.address().port}`, '--no-tools', '--session', join(dir, 'session.json'), '--coord-dir', join(dir, 'coord'), '--agent-id', 'tui-test', '--retry-attempts', '1'], { cwd: dir, windowsHide: true, env: { ...process.env, DEEPSEEK_API_KEY: 'mock-key', DEEPSEEK_TUI_QUIET: '0', SWITCHYARD_NO_SUPPORT_PROMPT: '1', TERM: 'xterm-256color' } });
   let stdout = '', stderr = '';
   child.stdout.on('data', data => { stdout += data; }); child.stderr.on('data', data => { stderr += data; });
   const exit = await new Promise((resolve, reject) => { const timer = setTimeout(() => { child.kill(); reject(new Error('CLI timeout: ' + stdout + stderr)); }, 12000); child.on('error', reject); child.on('close', code => { clearTimeout(timer); resolve(code); }); });

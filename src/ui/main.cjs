@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const { createServer } = require("node:http");
 const { mkdir, readdir, readFile, writeFile } = require("node:fs/promises");
 const { join, resolve } = require("node:path");
+const { existsSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 
@@ -17,6 +18,10 @@ const coordRoot = resolve(process.env.DEEPSEEK_UI_COORD_DIR || join(workspace, "
 // agent-coordination.js is ESM; load it lazily from CJS via dynamic import.
 function coordinationApi() {
   return import("../agent-coordination.js");
+}
+
+function supportPromptApi() {
+  return Promise.all([import("../support-prompt.js"), import("../config.js")]);
 }
 
 function coordinationError(error) {
@@ -189,7 +194,7 @@ function parseOutput(markdown) {
 
 async function startRun({ prompt, permission = "review", sessionPath = "" }) {
   if (!prompt || typeof prompt !== "string") throw new Error("prompt is required.");
-  if (!["review", "full"].includes(permission)) throw new Error("permission must be review or full.");
+  if (!["review", "full", "yolo"].includes(permission)) throw new Error("permission must be review, full, or yolo.");
 
   const id = randomUUID();
   const targetSession = sessionPath || newUiSessionPath(id);
@@ -370,6 +375,7 @@ function createWindow() {
     minWidth: 920,
     minHeight: 620,
     backgroundColor: "#0f1115",
+    ...(existsSync(resolve(__dirname, "..", "..", "icon.png")) ? { icon: resolve(__dirname, "..", "..", "icon.png") } : {}),
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -380,6 +386,19 @@ function createWindow() {
 }
 
 ipcMain.handle("app:info", () => ({ workspace, controlPort, cdpPort, coordRoot }));
+ipcMain.handle("support:status", async () => {
+  const [support, configApi] = await supportPromptApi();
+  const config = await configApi.readConfig();
+  return { due: support.shouldPromptForPersonalSupport(config.personalSupportPrompt), url: support.PERSONAL_SUPPORT_URL };
+});
+ipcMain.handle("support:respond", async (_event, choice) => {
+  const [support, configApi] = await supportPromptApi();
+  const config = await configApi.readConfig();
+  config.personalSupportPrompt = support.personalSupportResponse(choice);
+  await configApi.writeConfig(config);
+  if (choice === "open") await shell.openExternal(support.PERSONAL_SUPPORT_URL);
+  return { ok: true };
+});
 ipcMain.handle("runs:list", () => Array.from(runs.values()).map(safeRun));
 ipcMain.handle("chat:start", async (_event, input) => safeRun(await startRun(input || {})));
 ipcMain.handle("sessions:list", () => listSessionSummaries());

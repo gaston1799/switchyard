@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("deepseekUi", {
   info: () => ipcRenderer.invoke("app:info"),
+  supportStatus: () => ipcRenderer.invoke("support:status"),
+  respondSupport: (choice) => ipcRenderer.invoke("support:respond", choice),
   listRuns: () => ipcRenderer.invoke("runs:list"),
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   readSession: (path) => ipcRenderer.invoke("sessions:read", path),
