@@ -60,6 +60,24 @@ function Test-Command {
   return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-Npm {
+  param([string[]]$NpmArgs)
+  $npmScript = Get-Command npm.ps1 -ErrorAction SilentlyContinue
+  if ($npmScript) {
+    try {
+      & $npmScript.Source @NpmArgs
+      return
+    } catch [System.Management.Automation.PSSecurityException] {
+      Write-Warn "PowerShell blocked npm.ps1; retrying with npm.cmd..."
+    }
+  }
+  $npmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if (-not $npmCmd) {
+    Write-Fail "npm.cmd was not found. Repair your Node.js installation and re-run."
+  }
+  & $npmCmd.Source @NpmArgs
+}
+
 function Invoke-Refresh-Path {
   $machine = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
   $user    = [System.Environment]::GetEnvironmentVariable("PATH", "User")
@@ -161,7 +179,7 @@ Set-Location $repoDir
 # ── install dev dependencies (esbuild, postject) ──────────────────────────────
 
 Write-Step "Installing build dependencies..."
-& npm install
+Invoke-Npm -NpmArgs @("install")
 if ($LASTEXITCODE -ne 0) { Write-Fail "npm install failed." }
 
 # ── build standalone exes ─────────────────────────────────────────────────────
