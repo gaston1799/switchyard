@@ -186,6 +186,29 @@ test('picker supports filtering, numeric selection, paging and draft restoration
   assert.equal(ui.queue.length, 0);
 });
 
+test('setup picker accepts console, keypad and CSI-u Enter after arrow navigation', async t => {
+  const { ui, input } = fixture(t);
+  const items = [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }];
+  for (const sequence of ['\r', '\n', '\x1bOM', '\x1b[13u', '\x1b[13;1u']) {
+    const picked = ui.select('Setup', 'Choose a connection', items);
+    input.write('\x1b[B');
+    assert.equal(ui.selection.index, 1);
+    input.write(sequence);
+    assert.equal(ui.selection, null, `Enter must confirm the selection: ${JSON.stringify(sequence)}`);
+    assert.equal(await picked, 'second');
+  }
+});
+
+test('CSI-u Shift+Enter inserts a newline and keypad Enter submits the draft', async t => {
+  const { ui, input } = fixture(t);
+  ui.busy = false;
+  input.write('first\x1b[13;2usecond');
+  assert.equal(ui.draft.join(''), 'first\nsecond');
+  const submitted = ui.nextPrompt();
+  input.write('\x1bOM');
+  assert.equal(await submitted, 'first\nsecond');
+});
+
 test('mouse wheel moves through saved-session style pickers', async t => {
   const { ui, input } = fixture(t);
   ui.debugInput = true;

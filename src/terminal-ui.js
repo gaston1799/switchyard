@@ -174,6 +174,16 @@ export class TerminalUI {
     this.schedule();
   }
   key(str, key) {
+    // Node readline leaves application-keypad and CSI-u Enter unnamed. Some
+    // Windows/remote terminal hosts emit these instead of a carriage return.
+    const enterSequence = key.sequence || str || '';
+    const csiEnter = /^\x1b\[13(?:;(\d+))?u$/.exec(enterSequence);
+    if (enterSequence === '\x1bOM' || csiEnter || enterSequence === '\r' || enterSequence === '\n') {
+      const modifiers = csiEnter ? Number(csiEnter[1] || 1) - 1 : null;
+      key = { ...key, name: 'return', ...(modifiers === null ? {} : {
+        shift: Boolean(modifiers & 1), meta: Boolean(modifiers & 2), ctrl: Boolean(modifiers & 4)
+      }) };
+    }
     // SGR mouse wheel events arrive as CSI < button ; x ; y M sequences.
     // Three transcript rows per notch keeps wheel scrolling distinct from PgUp/Dn.
     const sequence = key.sequence || '';
