@@ -1,7 +1,7 @@
 import { writeFile, readFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CodexBackend, ClaudeBackend } from './native-backends.js';
-import { newSessionPath, readSession, writeSession, touchSession } from './session-memory.js';
+import { newSessionPath, readSession, writeSession, touchSession, fallbackSessionTitle } from './session-memory.js';
 import { TerminalUI, cleanText } from './terminal-ui.js';
 import { chooseModel, SLASH_HELP, parseSlash } from './connection-picker.js';
 import { formatBudget } from './provider-budget.js';
@@ -18,7 +18,7 @@ export async function runNativeChat(opts, helpers) {
   opts.session ||= newSessionPath();
   opts.provider = opts.backend === 'codex' ? 'ChatGPT / Codex' : 'Claude account';
   if (opts.systemFile) opts.system = await readFile(resolve(opts.systemFile), 'utf8');
-  const session = prior || { version: 1, createdAt: new Date().toISOString(), workspace: opts.cwd, messages: [], config: { backend: opts.backend, permission: opts.permission }, native: {} };
+  const session = prior || { version: 1, createdAt: new Date().toISOString(), workspace: opts.cwd, messages: [], config: { backend: opts.backend, permission: opts.permission, coordDir: opts.coordDir || '' }, native: {} };
   session.native ||= {};
   session.config.permission = opts.permission;
   let saves = Promise.resolve(), backend, ui, lastAnswer = '', failed = false;
@@ -59,7 +59,7 @@ export async function runNativeChat(opts, helpers) {
         const call = { id: event.id, function: { name: event.name, arguments: event.args || '{}' } };
         toolCalls.set(event.id, call);
         if (ui) ui.addTool(call);
-        else if (!opts.noOutput) process.stdout.write(`\n› ${event.name}\n`);
+        else if (!opts.noOutput && !opts.uiStream) process.stdout.write(`\n› ${event.name}\n`);
       }
       if (ui?.tools.has(event.id) && event.args) { const card = ui.tools.get(event.id); card.args = event.args; card.cache = null; }
       if (event.done) {
@@ -130,7 +130,13 @@ export async function runNativeChat(opts, helpers) {
         prompt = null; continue;
       }
       writers = new Map(); toolCalls = new Map();
-      session.messages.push({ role: 'user', content: prompt }); await save();
+      session.messages.push({ role: 'user', content: prompt });
+      if (!session.title) {
+        session.title = fallbackSessionTitle(session.messages.find(message => message.role === 'user')?.content) || 'New chat';
+        session.titleSource = 'prompt';
+        session.titleSetAt = new Date().toISOString();
+      }
+      await save();
       if (ui) { ui.busy = true; ui.add('user', prompt); ui.interrupt = () => { void backend.interrupt().catch(error => notice(error.message)); }; }
       const onInterrupt = () => { void backend.interrupt().catch(error => notice(error.message)); };
       process.on('SIGINT', onInterrupt);

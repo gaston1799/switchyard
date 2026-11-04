@@ -15,11 +15,12 @@
  */
 
 import { execSync } from "node:child_process";
-import { cpSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, copyFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import rcedit from "rcedit";
+import "./scripts/build-ui.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(ROOT, "dist", "exe");
@@ -105,9 +106,55 @@ for (const { name, src } of ENTRIES) {
 }
 
 // Preserve existing standalone command aliases.
-for (const alias of ["dsw", "d"]) {
+for (const alias of ["switchyard-cli", "dsw", "d"]) {
   copyFileSync(resolve(DIST, "switchyard.exe"), resolve(DIST, `${alias}.exe`));
   process.stdout.write(`\n  ✓ ${alias}.exe (alias for switchyard)\n`);
 }
+
+// Build a real Electron application beside the standalone CLI executables.
+// The installer places this directory in Programs and creates the Start Menu
+// shortcut against Switchyard.exe, rather than the console-oriented SEA CLI.
+const DESKTOP = resolve(ROOT, "dist", "desktop");
+const ELECTRON_DIST = resolve(ROOT, "node_modules", "electron", "dist");
+const APP_ROOT = resolve(DESKTOP, "resources", "app");
+mkdirSync(DESKTOP, { recursive: true });
+if (!readFileSync(resolve(ELECTRON_DIST, "version"), "utf8").trim()) {
+  throw new Error("Electron runtime is missing. Run npm install before building the desktop app.");
+}
+for (const entry of readdirSync(ELECTRON_DIST, { withFileTypes: true })) {
+  const source = resolve(ELECTRON_DIST, entry.name);
+  if (entry.name.toLowerCase() === "electron.exe") {
+    copyFileSync(source, resolve(DESKTOP, "Switchyard.exe"));
+  } else if (entry.isDirectory()) {
+    cpSync(source, resolve(DESKTOP, entry.name), { recursive: true, force: true });
+  } else {
+    copyFileSync(source, resolve(DESKTOP, entry.name));
+  }
+}
+mkdirSync(APP_ROOT, { recursive: true });
+cpSync(resolve(ROOT, "src"), resolve(APP_ROOT, "src"), { recursive: true, force: true });
+for (const asset of ["icon.ico", "icon.png", "icon.svg"]) {
+  copyFileSync(resolve(ROOT, asset), resolve(APP_ROOT, asset));
+  copyFileSync(resolve(ROOT, asset), resolve(DESKTOP, asset));
+}
+copyFileSync(resolve(DIST, "d.exe"), resolve(DESKTOP, "d.exe"));
+writeFileSync(resolve(APP_ROOT, "package.json"), `${JSON.stringify({
+  name: "switchyard-desktop",
+  version: VERSION,
+  private: true,
+  type: "module",
+  main: "src/ui/main.cjs"
+}, null, 2)}\n`);
+await rcedit(resolve(DESKTOP, "Switchyard.exe"), {
+  icon: resolve(ROOT, "icon.ico"),
+  "version-string": {
+    ProductName: "Switchyard",
+    FileDescription: "Switchyard Desktop",
+    CompanyName: "Switchyard"
+  },
+  "file-version": VERSION,
+  "product-version": VERSION
+});
+process.stdout.write(`\n  ✓ Electron desktop app: ${DESKTOP}\n`);
 
 process.stdout.write(`\nOutput: ${DIST}\n`);

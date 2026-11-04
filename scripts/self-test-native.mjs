@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { CodexBackend, ClaudeBackend, summarizeClaudeToolResult } from '../src/native-backends.js';
-import { subscriptionEnv, resolveNativeCli } from '../src/native-process.js';
+import { subscriptionEnv, resolveNativeCli, resolveNodeExecutable } from '../src/native-process.js';
 import { discoverModels, applyApiModel, parseSlash } from '../src/connection-picker.js';
 import { contextLimitFor } from '../src/providers.js';
 import { budgetLevel, claudeBudget, codexBudget, deepSeekBudget, upsertBudgetContext } from '../src/provider-budget.js';
@@ -45,6 +45,7 @@ const args=process.argv.slice(2);
 if(args[0]==='auth') { console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',subscriptionType:'pro'}));process.exit(0); }
 const send=x=>console.log(JSON.stringify(x));
 const codex=args[0]==='app-server';
+if(codex) console.log('');
 let turn=0;
 for await(const line of createInterface({input:process.stdin})) {
  const m=JSON.parse(line);
@@ -157,9 +158,21 @@ test('CLI saves native session metadata and resumes the backend automatically', 
   await run(['--backend', 'codex', '-p', 'first']);
   let saved = JSON.parse(await readFile(session, 'utf8'));
   assert.equal(saved.config.backend, 'codex'); assert.equal(saved.native.id, 'native-123');
+  assert.equal(saved.title, 'first'); assert.equal(saved.titleSource, 'prompt');
   await run(['--resume', '-p', 'follow-up']); saved = JSON.parse(await readFile(session, 'utf8'));
   assert.equal(saved.messages.filter(x => x.role === 'user').length, 2);
+  assert.equal(saved.title, 'first');
   assert.match(await readFile(output, 'utf8'), /answer/);
+});
+
+test('Electron launches JavaScript CLIs with system Node instead of the app executable', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'switchyard-node-runtime-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const nodeFile = join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+  await writeFile(nodeFile, 'test runtime');
+  assert.equal(resolveNodeExecutable({ PATH: dir }, { isElectron: true, execPath: 'Switchyard.exe' }), nodeFile);
+  assert.equal(resolveNodeExecutable({ PATH: dir }, { isElectron: false, execPath: 'd.exe' }), nodeFile);
+  assert.equal(resolveNodeExecutable({ PATH: dir }, { isElectron: false, execPath: process.execPath }), process.execPath);
 });
 
 test('API provider changes retain complete tool pairs and update the context budget', () => {

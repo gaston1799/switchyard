@@ -27,6 +27,18 @@
 
 ## Deferred integrations
 
+- [ ] Add Slack mobile messaging through the official Switchyard app and a local connector.
+  - [x] Create the branded owner address `switchyard@agent-toolpacks.com`, register the Switchyard Slack app, install it in the Agent Toolpacks development workspace, and add the Switchyard icon.
+  - See [Slack setup and manifest](integrations/slack/README.md) for the registered app and current setup status.
+  - Keep agents running on each user's computer. Model requests must use that user's configured provider credentials or supported signed-in backend; the shared relay must not supply or share the developer's model credits.
+  - Build a Cloudflare-hosted messaging relay with Slack signature verification, OAuth state validation, isolated workspace credentials, and an authenticated outbound connection from each paired Switchyard installation.
+  - Provide a Connect Slack / Add to Slack flow for GitHub installations, authorize the intended Slack users, and support revoking a paired computer. Offer a self-hosted relay / bring-your-own Slack app option later.
+  - Map Slack workspace, channel, and thread to a project, session, and agent. Persist message IDs and queued/received/failed receipts so retries and reconnects do not duplicate work or cross project boundaries.
+  - Wake parked agents, queue messages for working agents at safe turn boundaries, and resume stopped sessions once using their saved working and coordination directories.
+  - Return agent replies to the originating Slack thread. Add a dedicated messaging skill for concise progress, questions, completion, and parking while awaiting a reply without idle model requests.
+  - Verify phone-to-agent-to-phone delivery, attachments, reconnect recovery, isolation between two users/workspaces, and credential/billing separation before enabling customer distribution.
+  - Keep relay hosting costs separate from model usage. Defer production deployment and Slack Marketplace publication until the connector and end-to-end flow are ready.
+
 - [ ] Add a generic `mcp_call` client surface.
   - No MCP server or connection details are currently configured.
   - Keep the implementation transport-agnostic: stdio and HTTP, explicit per-server configuration, and least-privilege tool exposure.

@@ -2,7 +2,7 @@ import { normalizeProvider, providerConfig } from './providers.js';
 
 // Reference USD / million text tokens, checked against these official pages.
 // Exact IDs only: never guess prices for snapshots, fine-tunes or new variants.
-export const PRICING_CHECKED = '2026-10-06';
+export const PRICING_CHECKED = '2026-11-03';
 export const PRICING_SOURCES = {
   openai: 'https://developers.openai.com/api/docs/pricing',
   anthropic: 'https://platform.claude.com/docs/en/about-claude/pricing',
@@ -36,6 +36,7 @@ const rates = {
     'o4-mini': [1.1, 0.275, 4.4],
     'gpt-6-astra': [10, 1, 50, 12.5],
     'gpt-6.1-sol': [2, 0.1, 10, 2.5],
+    'gpt-6.1-terra': [1, 0.05, 5, 1.25],
     'gpt-6-sol': [2, 0.2, 10, 2.5],
     'gpt-6-luna': [0.1, 0.01, 0.5, 0.125],
     'gpt-5.6-sol': [4, 0.4, 20, 5],
@@ -71,7 +72,8 @@ const rates = {
     'claude-sonnet-4-5': [3, 0.3, 15, 3.75, 6],
     'claude-sonnet-4-6': [3, 0.3, 15, 3.75, 6],
     'claude-sonnet-5': [2, 0.2, 10, 2.5, 4],
-    'claude-sonnet-5-5': [2, 0.2, 10, 2.5, 4],
+    'claude-sonnet-5-5': [2, 0.1, 10, 2.5, 4],
+    'claude-haiku-5-5': [0.1, 0.01, 0.5, 0.125, 0.2],
     'claude-opus-5-5': [4, 0.2, 20, 5, 8],
     'claude-opus-4-5': [5, 0.5, 25, 6.25, 10],
     'claude-opus-4-6': [5, 0.5, 25, 6.25, 10],
@@ -88,6 +90,7 @@ const rates = {
     'glm-5.2': [1.4, 0.26, 4.4],
     'glm-5.3-flash': [0.15, 0.03, 0.5],
     'glm-5.3-flashx': [0.37, 0.075, 1.25],
+    'glm-5.3-flashx-legal': [0.37, 0.075, 1.25],
     'glm-5.1': [1.4, 0.26, 4.4],
     'glm-5': [1, 0.2, 3.2],
     'glm-4.7': [0.6, 0.11, 2.2],
@@ -117,12 +120,21 @@ const rates = {
   }
 };
 
-export function modelPrice(provider, id) {
+export function modelPrice(provider, id, { inputTokens = 0 } = {}) {
   const normalized = normalizeProvider(provider);
   const key = String(id || '').toLowerCase();
   const row = Object.hasOwn(rates[normalized] || {}, key) ? rates[normalized][key] : null;
   if (!row) return null;
-  const [input, cached, output, write, write1h] = row;
+  let [input, cached, output, write, write1h] = row;
+  if (normalized === 'anthropic' && key === 'claude-haiku-5-5' && inputTokens > 100_000) {
+    [input, cached, output, write, write1h] = row.map(value => value == null ? value : value * 5);
+  }
+  if (normalized === 'openai' && /^gpt-6(?:\.1)?-(?:sol|terra|luna)$/.test(key) && inputTokens > 272_000) {
+    input *= 2;
+    cached *= 2;
+    write *= 2;
+    output *= 1.5;
+  }
   return { input, cached, output, write, write1h, source: PRICING_SOURCES[normalized], checked: PRICING_CHECKED };
 }
 
@@ -145,6 +157,8 @@ export function priceModelChoices(models, opts) {
         + (price.write1h != null ? ` · write 1h ${dollars(price.write1h)}` : '')
         + (custom ? ' · Custom endpoint: vendor reference only' : '')
         + (provider === 'deepseek' ? ' · Peak rates; off-peak 50% less' : ' · Standard base rates')
+        + (provider === 'anthropic' && model.id === 'claude-haiku-5-5' ? ' · Above 100k input: all token rates 5× for the full request' : '')
+        + (provider === 'openai' && /^gpt-6(?:\.1)?-(?:sol|terra|luna)$/.test(model.id) ? ' · Above 272k input: input/cache 2×, output 1.5× for the full request' : '')
         + (cost == null ? '' : ` · Example 10k in + 1k out: $${cost.toFixed(5)} (no caching)`)
         + ` · Checked ${price.checked}; extra tool/long-context charges may apply`
       : 'Price unknown · Check provider pricing; not assumed free';

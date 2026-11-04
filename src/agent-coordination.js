@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { workspaceCoordinationDirectory } from "./data-store.js";
 
 const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
@@ -33,7 +34,7 @@ export function generateAgentId(role = "agent") {
 }
 
 export function coordinationRoot(value, cwd = process.cwd()) {
-  return resolve(cwd, value || join(".deepseek-watch", "coordination"));
+  return value ? resolve(cwd, value) : workspaceCoordinationDirectory(cwd);
 }
 
 function paths(root) {
@@ -145,6 +146,34 @@ export async function createAgentRuntime(root, options = {}) {
     if (!isMissing(error)) throw error;
   }
 
+  const ownerFiles = [file + '.owner', ...(options.session ? [resolve(options.session) + '.owner'] : [])];
+  const acquired = [];
+  const releaseOwnership = async () => {
+    for (const path of acquired.splice(0)) {
+      try { const owner = await readJson(path); if (owner.instanceId === instanceId) await unlink(path); }
+      catch (error) { if (!isMissing(error)) throw error; }
+    }
+  };
+  try {
+    for (const path of ownerFiles) {
+      await mkdir(dirname(path), { recursive: true });
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const handle = await open(path, 'wx');
+          try { await handle.writeFile(JSON.stringify({ pid: process.pid, instanceId })); } finally { await handle.close(); }
+          acquired.push(path); break;
+        } catch (error) {
+          if (error.code !== 'EEXIST' || attempt > 0) throw error;
+          let owner;
+          try { owner = await readJson(path); }
+          catch { throw new Error(`Agent/session ownership is being acquired: ${path}`); }
+          if (isProcessAlive(owner.pid)) throw new Error(`Agent/session already active with PID ${owner.pid}.`);
+          try { await unlink(path); } catch (error) { if (!isMissing(error)) throw error; }
+        }
+      }
+    }
+  } catch (error) { await releaseOwnership(); throw error; }
+
   let record = {
     schemaVersion: 1,
     agentId,
@@ -154,6 +183,8 @@ export async function createAgentRuntime(root, options = {}) {
     coordinationRoot: root,
     session: options.session ? resolve(options.session) : null,
     role: String(options.role || "worker"),
+    displayName: String(options.displayName || options.display_name || agentId).trim().slice(0, 80) || agentId,
+    coordinatorId: options.coordinatorId ? validateAgentId(options.coordinatorId) : null,
     state: String(options.state || "starting"),
     mission: String(options.mission || ""),
     claimedTasks: [],
@@ -174,8 +205,10 @@ export async function createAgentRuntime(root, options = {}) {
     return writeChain;
   };
 
-  await writeRecord();
-  await appendEvent(root, "agent_registered", { agentId, instanceId, pid: process.pid, workspace: record.workspace, role: record.role });
+  try {
+    await writeRecord();
+    await appendEvent(root, "agent_registered", { agentId, instanceId, pid: process.pid, workspace: record.workspace, role: record.role });
+  } catch (error) { await releaseOwnership(); throw error; }
   const heartbeatMs = Math.max(Number(options.heartbeatMs) || DEFAULT_HEARTBEAT_MS, 250);
   const heartbeat = setInterval(() => { void writeRecord(); }, heartbeatMs);
   heartbeat.unref?.();
@@ -200,12 +233,21 @@ export async function createAgentRuntime(root, options = {}) {
       await writeRecord({ ...patch, state });
       stopped = true;
       await appendEvent(root, "agent_stopped", { agentId, instanceId, state });
+      await releaseOwnership();
       return { ...record };
     }
   };
 }
 
+const messageWrites = new Map();
 export async function sendAgentMessage(root, input = {}) {
+  const key = `${resolve(root)}:${input.to}:${input.id || randomUUID()}`;
+  const next = (messageWrites.get(key) || Promise.resolve()).catch(() => {}).then(() => sendAgentMessageOnce(root, input));
+  messageWrites.set(key, next);
+  try { return await next; } finally { if (messageWrites.get(key) === next) messageWrites.delete(key); }
+}
+
+async function sendAgentMessageOnce(root, input = {}) {
   const p = await initializeCoordination(root);
   const from = validateAgentId(input.from);
   const to = validateAgentId(input.to);
@@ -217,7 +259,20 @@ export async function sendAgentMessage(root, input = {}) {
     if (isMissing(error)) throw new Error(`unknown agent '${to}'. Use 'd agents --all' to inspect registered agents.`);
     throw error;
   }
-  const id = randomUUID();
+  const id = input.id || randomUUID();
+  if (!/^[A-Za-z0-9-]{1,100}$/.test(id)) throw new Error('Invalid message ID.');
+  const stamp = input.id ? Number(id.match(/^\d{13}/)?.[0]) : Date.now();
+  if (!Number.isFinite(stamp)) throw new Error('A supplied message ID must start with its timestamp.');
+  const filename = `${stamp}-${id}.json`;
+  if (input.id) {
+    for (const folder of [p.processed, p.inbox]) {
+      try {
+        const existing = await readJson(join(folder, to, filename));
+        if (existing.body !== body || existing.from !== from) throw new Error('Message ID already used for different content.');
+        return existing;
+      } catch (error) { if (!isMissing(error)) throw error; }
+    }
+  }
   const message = {
     schemaVersion: 1,
     id,
@@ -232,7 +287,7 @@ export async function sendAgentMessage(root, input = {}) {
   };
   const inbox = join(p.inbox, to);
   await mkdir(inbox, { recursive: true });
-  await writeJsonAtomic(join(inbox, `${Date.now()}-${id}.json`), message);
+  await writeJsonAtomic(join(inbox, filename), message);
   await appendEvent(root, "message_sent", { messageId: id, from, to, messageType: message.type, taskId: message.taskId });
   return message;
 }
@@ -253,6 +308,52 @@ export async function readAgentInbox(root, agentId, { max = 100 } = {}) {
     } catch {}
   }
   return messages;
+}
+
+export async function listAgentMessages(root, agentId, { max = 200 } = {}) {
+  const id = validateAgentId(agentId);
+  const p = await initializeCoordination(root);
+  const messages = [];
+  for (const [folder, deliveryState] of [[p.inbox, "pending"], [p.processed, "processed"]]) {
+    const directory = join(folder, id);
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); }
+    catch (error) { if (isMissing(error)) continue; throw error; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      try {
+        messages.push({
+          ...(await readJson(join(directory, entry.name))),
+          _file: entry.name,
+          deliveryState
+        });
+      } catch { /* ignore partial or malformed coordination records */ }
+    }
+  }
+  const limit = Math.min(Math.max(Number(max) || 200, 1), 1000);
+  return messages
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)))
+    .slice(-limit);
+}
+
+export async function listCoordinationEvents(root, { max = 300 } = {}) {
+  const p = await initializeCoordination(root);
+  const entries = (await readdir(p.events, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const todayTotal = entries.reduce((count, entry) => {
+    const timestamp = Number(entry.name.split("-", 1)[0]);
+    return count + (Number.isFinite(timestamp) && timestamp >= midnight.getTime() ? 1 : 0);
+  }, 0);
+  const limit = Math.min(Math.max(Number(max) || 300, 1), 2000);
+  const events = [];
+  for (const entry of entries.slice(-limit)) {
+    try { events.push(await readJson(join(p.events, entry.name))); }
+    catch { /* Ignore malformed event records. */ }
+  }
+  return { total: entries.length, todayTotal, events };
 }
 
 export async function acknowledgeAgentMessages(root, agentId, messages) {

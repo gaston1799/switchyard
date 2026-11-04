@@ -7,13 +7,13 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0f1115;
-      --panel: #171a21;
-      --panel-2: #1f2430;
-      --line: #303746;
-      --text: #eceff4;
-      --muted: #9aa4b2;
-      --accent: #47c2ff;
+      --bg: #212121;
+      --panel: #2a2a2a;
+      --panel-2: #303030;
+      --line: #3c3c3c;
+      --text: #f3f3f3;
+      --muted: #a0a0a0;
+      --accent: #10a37f;
       --ok: #6ee7a8;
       --bad: #ff7b7b;
       --warn: #ffd36a;
@@ -32,14 +32,14 @@
 
     .app {
       display: grid;
-      grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
+      grid-template-columns: 260px minmax(0, 1fr);
       height: 100vh;
       min-height: 0;
     }
 
     aside {
       border-right: 1px solid var(--line);
-      background: #12151b;
+      background: #171717;
       padding: 18px;
       display: flex;
       flex-direction: column;
@@ -106,6 +106,8 @@
       padding: 0 11px;
       font: inherit;
     }
+
+    select option { background: #252525; color: #f3f3f3; }
 
     button {
       cursor: pointer;
@@ -265,6 +267,16 @@
       font-weight: 650;
     }
 
+    .session-title button {
+      flex: 0 0 auto;
+      height: 27px;
+      padding: 0 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      background: var(--panel-2);
+      border-color: var(--line);
+    }
+
     .status {
       color: var(--warn);
       font-size: 12px;
@@ -277,7 +289,7 @@
     .topbar {
       border-bottom: 1px solid var(--line);
       padding: 18px 22px;
-      background: #12151b;
+      background: var(--bg);
       display: flex;
       justify-content: space-between;
       gap: 18px;
@@ -288,7 +300,7 @@
       min-width: 0;
       min-height: 0;
       overflow: hidden;
-      padding: 22px;
+      padding: 0;
       display: grid;
       grid-template-rows: minmax(0, 1fr) auto auto;
       gap: 18px;
@@ -355,6 +367,11 @@
     .message.user { border-color: #2b6b82; }
     .message.assistant { border-color: #2d684a; }
     .message.tool { border-color: #6c5b2a; }
+    .message.user { align-self: flex-end; width: min(82%, 900px); background: #142430; }
+    .message.assistant, .message.agent { align-self: flex-start; width: min(90%, 980px); }
+    .message.coordination { border-style: solid; background: #171d29; }
+    .message.coordination.agent { border-color: #536d9b; }
+    .message.coordination.user { border-color: #2b6b82; background: #142430; }
 
     details.tool-call {
       margin-top: 10px;
@@ -411,84 +428,344 @@
       white-space: pre-wrap;
     }
 
-    @media (max-width: 880px) {
-      .app { grid-template-columns: 1fr; }
-      aside { border-right: 0; border-bottom: 1px solid var(--line); }
-      .logs { grid-template-columns: 1fr; }
+    .brand { display:flex; align-items:center; gap:12px; }
+    .brand-mark { width:38px; height:38px; border-radius:11px; display:block; object-fit:cover; background:#171717; border:1px solid #353535; }
+    .brand .meta { margin-top:2px; }
+    .side-nav { display:grid; gap:4px; }
+    .side-nav button { width:100%; height:40px; text-align:left; color:#b7bdc9; background:transparent; border-color:transparent; display:flex; align-items:center; gap:11px; }
+    .side-nav button:hover, .side-nav button.active { color:#f3f3f3; background:#2a2a2a; border-color:#2a2a2a; }
+    .nav-icon { width:20px; text-align:center; font-size:16px; }
+    .side-scroll { min-height:0; overflow:auto; display:grid; align-content:start; gap:14px; }
+    .run-composer { border:1px solid var(--line); border-radius:10px; background:#252525; padding:9px; }
+    .run-composer summary { cursor:pointer; color:#d9d7ff; font-weight:650; padding:3px; }
+    .run-composer textarea { min-height:88px; margin-top:9px; font-size:12px; }
+    .run-composer .toolbar { grid-template-columns:1fr auto; align-items:end; margin-top:9px; }
+    .run-composer select, .run-composer button { height:32px; font-size:12px; }
+    .sidebar-section { display:grid; gap:8px; min-height:0; }
+    .sidebar-section h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .dashboard-view, .page-view { min-height:0; overflow:auto; display:grid; align-content:start; gap:20px; padding:24px 32px; }
+    .hidden { display:none !important; }
+    .dashboard-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    .stat-card, .dashboard-panel { border:1px solid #3a3a3a; border-radius:14px; background:#2a2a2a; padding:20px; }
+    .stat-card { min-height:116px; display:grid; align-content:space-between; }
+    .stat-label { color:#85889a; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }
+    .stat-value { font-size:30px; font-weight:700; letter-spacing:-.03em; }
+    .stat-foot { color:var(--muted); font-size:12px; }
+    .dashboard-columns { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; }
+    .dashboard-panel { min-width:0; }
+    .panel-heading { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+    .panel-heading button { height:30px; background:transparent; border-color:transparent; color:#a69fff; }
+    .agent-tree, .activity-feed { display:grid; gap:9px; }
+    .tree-agent, .activity-row { border:1px solid #3a3a3a; background:#303030; border-radius:10px; padding:12px; }
+    button.tree-agent { width:100%; height:auto; min-height:58px; text-align:left; display:block; background:#303030; border-color:#3a3a3a; white-space:normal; }
+    button.tree-agent:hover { border-color:#555; background:#383838; }
+    .tree-agent.child { margin-left:28px; border-left:2px solid #10a37f; }
+    .tree-top, .activity-top { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .tree-name { font-weight:650; }
+    .tree-sub, .activity-sub { display:block; color:var(--muted); font-size:12px; margin-top:6px; overflow-wrap:anywhere; font-weight:400; }
+    .health-pill { border:1px solid #285a43; background:#12271d; color:#83e0ae; border-radius:99px; padding:4px 10px; font-size:11px; font-weight:700; }
+    .health-pill.warn { border-color:#665426; background:#292212; color:#f0ca67; }
+    .view-controls { display:flex; align-items:center; gap:8px; }
+    .view-controls button { height:34px; padding:0 12px; background:#191924; border-color:#303044; color:var(--muted); }
+    .view-controls button.active { color:#fff; background:#343434; border-color:#444; }
+    .agent-actions { display:flex; gap:8px; }
+    .agent-actions button { height:30px; background:#25233d; border-color:#3a365f; color:#b6b0ff; font-size:12px; }
+    .data-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .data-table th, .data-table td { padding:11px 9px; text-align:left; border-bottom:1px solid var(--line); }
+    .data-table th { color:var(--muted); font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+    .table-scroll { overflow:auto; }
+    .health-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .health-item { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; overflow-wrap:anywhere; }
+    .health-item .stat-label { display:block; margin-bottom:8px; }
+    .muted-note { color:var(--muted); font-size:12px; line-height:1.5; }
+    .new-chat-button { width:100%; display:flex; align-items:center; gap:10px; background:transparent; border-color:transparent; color:#f3f3f3; text-align:left; }
+    .new-chat-button:hover { background:#2a2a2a; border-color:#2a2a2a; }
+    .session-search { width:100%; height:36px; border:1px solid transparent; border-radius:9px; background:#232323; color:var(--text); padding:0 11px; outline:none; }
+    .session-search:focus { border-color:#555; box-shadow:none; }
+    .session, .run { border:0; background:transparent; padding:9px 10px; border-radius:8px; }
+    .session:hover, .run:hover { background:#242424; }
+    .session.active, .run.active { border:0; background:#2a2a2a; }
+    .session-title { align-items:center; overflow:hidden; }
+    .session-title > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .session-title button { display:none; }
+    .session:hover .session-title button { display:block; }
+    .topbar { min-height:60px; padding:12px 24px; background:var(--bg); border-bottom:1px solid #303030; }
+    .topbar h1 { font-size:16px; font-weight:550; }
+    .topbar .run-meta { font-size:11px; }
+    #sessions-view { overflow:hidden; grid-template-rows:minmax(0,1fr) auto auto; gap:8px; padding:12px 32px 20px; }
+    #sessions-view .chat-section { grid-template-rows:0 minmax(0,1fr); gap:0; }
+    #sessions-view .chat-section > .panel-heading { visibility:hidden; margin:0; height:0; }
+    #sessions-view .history { width:min(100%, 820px); margin:0 auto; padding:8px 8px 20px; gap:14px; }
+    #sessions-view .message { border:0; border-radius:0; background:transparent; width:100%; max-width:100%; overflow:visible; }
+    #sessions-view .message-header { display:none; }
+    #sessions-view .message-body { padding:0; line-height:1.6; font-size:15px; }
+    #sessions-view .message.user { align-self:flex-end; width:auto; max-width:min(78%, 720px); background:#303030; border-radius:22px; padding:10px 16px; }
+    #sessions-view .message.user .message-body { padding:0; }
+    #sessions-view .message.assistant, #sessions-view .message.agent { align-self:stretch; }
+    #sessions-view .message.coordination { padding:10px 14px; border:1px solid #3a3a3a; border-radius:12px; background:#282828; }
+    .activity-group { flex:0 0 auto; color:#a6a6a6; font-size:13px; margin:0 0 4px; }
+    .activity-group > summary { cursor:pointer; width:fit-content; padding:3px 0; line-height:1.5; }
+    .activity-group > summary:hover { color:#eee; }
+    .activity-list { max-height:240px; overflow:auto; padding:4px 0 4px 16px; }
+    .activity-item { margin:2px 0; }
+    .activity-item > summary { cursor:pointer; padding:3px 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .activity-item pre { margin:5px 0 8px; padding:10px; max-height:220px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; color:#bdbdbd; background:#252525; border:1px solid #383838; border-radius:8px; }
+    .chat-composer { position:relative; width:min(100%, 900px); margin:0 auto; padding:12px 14px 10px; border:1px solid #444; border-radius:25px; background:#303030; box-shadow:0 3px 18px #0003; }
+    .chat-composer textarea { min-height:48px; max-height:200px; resize:none; overflow-y:auto; margin-top:0; border:0; border-radius:18px; background:transparent; padding:8px 11px; font:15px/1.5 "Segoe UI",system-ui,sans-serif; }
+    .chat-composer textarea:focus { border:0; box-shadow:none; }
+    .chat-composer textarea::placeholder { color:#858585; }
+    .chat-composer .picker-row { display:grid; gap:12px; }
+    .chat-composer .picker-row label, .effort-popover label { display:grid; min-width:0; gap:5px; color:#a0a0a0; font-size:10px; text-transform:uppercase; letter-spacing:.04em; }
+    .chat-composer .picker-row select, .effort-popover select { width:100%; height:34px; padding:0 10px; border:1px solid #454545; border-radius:9px; background:#262626; font-size:13px; text-transform:none; }
+    .model-hint { color:#999; font-size:11px; line-height:1.4; }
+    .chat-composer .attachments { display:flex; flex-wrap:wrap; gap:8px; padding:8px 5px 0; }
+    .attachment-chip { position:relative; width:76px; height:76px; overflow:hidden; border:1px solid #555; border-radius:12px; background:#202020; }
+    .attachment-chip img { width:100%; height:100%; object-fit:cover; }
+    .attachment-chip button { position:absolute; top:3px; right:3px; width:22px; height:22px; padding:0; border:0; border-radius:50%; background:#111d; color:white; font-size:15px; line-height:1; }
+    .chat-composer .toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:5px 2px 0; }
+    .composer-options, .composer-model-controls { display:flex; align-items:center; gap:6px; min-width:0; }
+    .chat-composer .permission-control, .chat-composer .role-control { display:flex; align-items:center; gap:5px; color:#b8b8b8; font-size:12px; white-space:nowrap; }
+    .chat-composer .permission-control > span, .chat-composer .role-control > span { color:#b6b6b6; font-size:12px; }
+    .chat-composer .permission-control select, .chat-composer .role-control select { appearance:none; width:auto; height:30px; padding:0 5px; border:0; border-radius:8px; background:transparent; color:inherit; font-size:12px; }
+    .chat-composer .permission-control[data-mode="full"], .chat-composer .permission-control[data-mode="yolo"] { color:#ff8757; }
+    .chat-composer .attach-button { width:34px; height:34px; border:0; border-radius:50%; background:transparent; color:#c8c8c8; font-size:22px; }
+    .chat-composer button { width:36px; height:36px; border:0; border-radius:50%; background:#3478e5; color:#fff; font-size:20px; padding:0; flex:0 0 auto; }
+    .chat-composer button:disabled { opacity:.45; }
+    .composer-menu { position:relative; min-width:0; }
+    .composer-menu > summary { display:flex; align-items:center; gap:6px; max-width:min(44vw,240px); padding:7px 6px; color:#e4e4e4; cursor:pointer; list-style:none; border-radius:8px; font-size:12px; white-space:nowrap; }
+    .composer-menu > summary::-webkit-details-marker { display:none; }
+    .composer-menu > summary:hover, .composer-menu[open] > summary { background:#414141; }
+    #model-current { overflow:hidden; text-overflow:ellipsis; }
+    .model-status-dot { width:10px; height:10px; flex:0 0 10px; border:2px solid #999; border-radius:50%; }
+    .menu-chevron { color:#aaa; font-size:15px; line-height:1; }
+    .composer-popover { position:absolute; z-index:20; bottom:calc(100% + 12px); right:0; width:min(360px, calc(100vw - 48px)); padding:14px; border:1px solid #484848; border-radius:16px; background:#262626; box-shadow:0 16px 44px #000a; }
+    .model-popover { display:grid; gap:12px; }
+    .model-popover #refresh-models { width:auto; height:28px; justify-self:start; padding:0 10px; border:1px solid #555; border-radius:7px; background:#333; font-size:12px; }
+    .effort-menu > summary { max-width:none; }
+    .effort-popover { width:250px; }
+    .effort-popover p { margin:10px 0 0; color:#929292; font-size:11px; line-height:1.45; }
+    .chat-composer:has(#prompt:placeholder-shown) { box-shadow:0 5px 24px #0004; }
+    .empty-chat .topbar { display:none; }
+    main.empty-chat { grid-template-rows:minmax(0,1fr); }
+    .empty-chat .content { min-height:0; background:#171717; }
+    .empty-chat #sessions-view { grid-template-rows:minmax(0,1fr); align-content:center; padding:0 32px; }
+    .empty-chat .chat-section, .empty-chat .chat-run-details { display:none; }
+    .empty-chat .chat-composer { align-self:center; width:min(100%, 740px); padding:10px 17px 9px; transform:translateY(8vh); }
+    .empty-chat .chat-composer textarea { min-height:40px; padding:4px 10px; }
+    @media (max-width: 700px) {
+      .empty-chat #sessions-view { padding:0 14px; }
+      .empty-chat .chat-composer { transform:translateY(3vh); }
+      .composer-menu > summary { max-width:36vw; }
     }
+    .chat-run-details { width:min(100%,850px); margin:0 auto; color:var(--muted); }
+    .chat-run-details summary { cursor:pointer; font-size:12px; padding:5px; }
+    .chat-run-details[open] { overflow:auto; max-height:160px; }
+    .chat-run-details .logs { margin-top:8px; }
+    .welcome { margin:auto; text-align:center; color:#f3f3f3; font-size:24px; font-weight:550; }
+    .content { grid-template-rows:minmax(0,1fr); }
+    aside { min-width:0; padding:18px 12px; gap:12px; }
+    .brand .meta { display:none; }
+    .brand h1 { font-size:19px; }
+    .brand-mark { width:30px; height:30px; }
+    .side-nav button { height:34px; font-size:13px; }
+    .side-scroll { display:block; flex:1; overflow-x:hidden; }
+    .sidebar-section { display:block; min-width:0; margin:16px 0; }
+    .sidebar-section h2, .sidebar-section > summary { margin:0 8px 8px; font-size:12px; text-transform:none; letter-spacing:0; color:var(--muted); }
+    .sidebar-section > summary { cursor:pointer; }
+    .session-search { width:100%; min-width:0; margin-bottom:12px; }
+    #sessions { display:block; overflow:visible; padding:0; }
+    .chat-folder { min-width:0; margin-bottom:14px; }
+    .chat-folder > summary { display:flex; align-items:center; gap:8px; padding:8px; font-size:13px; cursor:pointer; list-style:none; border-radius:7px; }
+    .chat-folder > summary::-webkit-details-marker { display:none; }
+    .chat-folder > summary:hover { background:#262626; }
+    .chat-folder > summary svg { width:17px; height:17px; flex-shrink:0; }
+    .chat-folder > summary > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+    .chat-folder > summary small { font-size:11px; color:var(--muted); }
+    .chat-folder > summary::after { content:'›'; color:var(--muted); }
+    .chat-folder[open] > summary::after { transform:rotate(90deg); }
+    .chat-folder-list { padding-left:12px; }
+    .session.chat-row { display:flex; align-items:center; gap:2px; border:0; padding:0 4px 0 0; background:transparent; min-width:0; border-radius:7px; }
+    .session.chat-row:hover, .session.chat-row.active { background:#303030; }
+    .chat-open { display:flex; align-items:center; gap:8px; flex:1; min-width:0; height:33px; padding:0 8px; border:0; background:transparent; font-size:13px; font-weight:400; text-align:left; }
+    .chat-open > span:first-child { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .chat-row .session-rename { flex-shrink:0; width:24px; height:26px; padding:0; border:0; background:transparent; color:var(--muted); visibility:hidden; }
+    .chat-row:hover .session-rename, .chat-row:focus-within .session-rename { visibility:visible; }
+    .chat-spinner { display:inline-block; width:12px; height:12px; flex:0 0 12px; border:1.5px solid #666; border-top-color:#ddd; border-radius:50%; animation:chat-spin .85s linear infinite; }
+    @keyframes chat-spin { to { transform:rotate(360deg); } }
+    @media (prefers-reduced-motion:reduce) { .chat-spinner { animation:none; } }
+    .chat-show-more { border:0; background:transparent; height:30px; font-size:12px; font-weight:400; color:var(--muted); padding:0 8px; }
+
+    @media (max-width: 1100px) {
+      .dashboard-columns { grid-template-columns:1fr; }
+      .dashboard-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    }
+    @media (max-width: 780px) {
+      .app { grid-template-columns: 1fr; grid-template-rows:auto minmax(0,1fr); }
+      aside { border-right:0; border-bottom:1px solid var(--line); max-height:42vh; }
+      .side-nav { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      .dashboard-stats, .health-grid { grid-template-columns:1fr; }
+      .logs { grid-template-columns:1fr; }
+    }
+    .window-titlebar { height:40px; display:flex; align-items:center; gap:12px; padding:0 150px 0 16px; background:#1c1e2b; color:#9699a8; -webkit-app-region:drag; user-select:none; }
+    .window-icon { width:18px; height:18px; object-fit:contain; }
+    .app-menus { display:flex; height:100%; align-items:center; -webkit-app-region:no-drag; }
+    .app-menus button { height:28px; padding:0 10px; border:0; border-radius:5px; background:transparent; color:inherit; font-size:13px; font-weight:400; }
+    .app-menus button:hover { background:#303241; color:#eee; }
+    .window-caption { margin-left:auto; font-size:12px; opacity:.7; }
+    .app { height:calc(100vh - 40px); background:#1c1e2b; padding:0 6px 6px 0; }
+    aside { background:#1c1e2b; border-right:0; }
+    main { grid-template-rows:auto auto minmax(0,1fr); border:1px solid #343541; border-radius:12px; overflow:hidden; background:var(--bg); }
+    main.empty-chat { grid-template-rows:auto minmax(0,1fr); }
+    .main-nav { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:9px 14px; border-bottom:1px solid #34343a; background:#191919; }
+    .main-nav button { width:auto; height:33px; gap:7px; padding:0 10px; font-size:13px; font-weight:500; }
+    .main-nav .nav-icon { width:16px; }
+    .main-nav button.active { background:#303030; }
+    .main-nav button:hover { background:#292929; }
+    .view-controls #monitor-toggle, .view-controls #health-toggle { display:none; }
+    .new-chat-button { margin-top:4px; }
+    .chat-row:hover, .session.chat-row.active { background:#333543; }
+    .side-scroll { scrollbar-color:#4b4d5b transparent; }
+    @media (max-width:980px) { .app { grid-template-columns:230px minmax(0,1fr); } .main-nav { gap:2px; padding:8px; } .main-nav button { padding:0 8px; font-size:12px; } }
+    main { grid-template-rows:auto minmax(0,1fr); }
+    main.empty-chat { grid-template-rows:minmax(0,1fr); }
+    .window-titlebar { gap:8px; }
+    .window-titlebar .main-nav { display:flex; flex-wrap:nowrap; padding:0; background:transparent; border:0; -webkit-app-region:no-drag; }
+    .window-titlebar .main-nav button { font-size:13px; height:28px; color:#b8bac7; padding:0 10px; }
+    .window-titlebar .main-nav button.active { color:#fff; background:#343645; }
+    .projects-heading { display:flex; align-items:center; justify-content:space-between; gap:4px; margin-bottom:8px; }
+    .projects-heading h2 { margin:0 8px; }
+    #new-project { height:26px; padding:0 5px; background:transparent; border:0; color:#b6b8c6; font-size:11px; font-weight:400; }
+    .project-picker-row { display:flex; align-items:center; gap:8px; margin:0 8px 6px; color:#aaa; }
+    #project-picker { max-width:55%; height:28px; border:0; background:#383838; color:#ddd; font-size:12px; }
+    #delivery-status { margin-left:auto; font-size:11px; }
+    #delivery-status[data-state=failed] { color:#ff9999; }
+    .chat-role { color:#9295a4; font-size:9px; flex:0 0 auto; }
+    @media (max-width:980px) { .window-titlebar .main-nav button { padding:0 7px; font-size:12px; } }
   </style>
+  <link rel="stylesheet" href="transcript.css">
 </head>
 <body>
+  <header class="window-titlebar">
+    <img src="../../icon.png" class="window-icon" alt="Switchyard">
+    <nav class="app-menus" aria-label="Application menus">
+      <button data-app-menu="all" aria-label="Application menu" title="Application menu">☰</button>
+    </nav>
+    <nav class="side-nav main-nav" id="side-nav" aria-label="Main navigation">
+      <button data-page="dashboard">Dashboard</button>
+      <button data-page="agents">Agents</button>
+      <button data-page="activity">Activity Feed</button>
+      <button data-page="analytics">Analytics</button>
+      <button data-page="health">Health</button>
+    </nav>
+    <span class="window-caption"></span>
+  </header>
   <div class="app">
     <aside>
-      <header>
-        <h1>Switchyard</h1>
-        <div class="meta" id="meta">Starting...</div>
+      <header class="brand">
+        <img class="brand-mark" src="../../icon.png" alt="">
+        <div><h1>Switchyard</h1><div class="meta" id="meta">Agent Control Center</div></div>
       </header>
-
-      <label>
-        Prompt
-        <textarea id="prompt" spellcheck="false">Read the workspace and summarize what this project does. Do not edit files.</textarea>
-      </label>
-
-      <div class="toolbar">
-        <label>
-          Permission
-          <select id="permission">
-            <option value="review">Review only</option>
-            <option value="full">Full access</option>
-            <option value="yolo">⚠ YOLO mode (auto-approve)</option>
-          </select>
-        </label>
-        <button id="send">Run</button>
+      <button class="new-chat-button" data-action="new-chat"><span class="nav-icon">✎</span>New chat</button>
+      <div class="side-scroll">
+        <section class="sidebar-section" id="sidebar-sessions">
+          <div class="projects-heading"><h2>Projects</h2><button id="new-project" title="Choose a working directory">＋ New project</button></div>
+          <input id="session-search" class="session-search" type="search" placeholder="Search chats" aria-label="Search chats">
+          <div class="sessions" id="sessions"></div>
+        </section>
+        <details class="sidebar-section" id="sidebar-runs">
+          <summary>Live runs</summary><div class="runs" id="runs"></div>
+        </details>
+        <details class="sidebar-section" id="sidebar-agents">
+          <summary>Agent messages</summary><div class="agents" id="agents"></div><div id="ui-replies"></div>
+        </details>
       </div>
-
-      <section>
-        <h2>Sessions</h2>
-        <div class="sessions" id="sessions"></div>
-      </section>
-
-      <section>
-        <h2>Runs</h2>
-        <div class="runs" id="runs"></div>
-      </section>
-
-      <section>
-        <h2>Agents <span class="meta" style="font-weight:400;text-transform:none">— send wakes parked</span></h2>
-        <div class="agents" id="agents"></div>
-        <div id="ui-replies"></div>
-      </section>
     </aside>
 
     <main>
       <div class="topbar">
         <div>
-          <h1 id="title">No session selected</h1>
-          <div class="run-meta" id="run-meta">Select a session to resume it, or send a prompt to start a new one.</div>
+          <h1 id="title">Dashboard</h1>
+          <div class="run-meta" id="run-meta">Live overview of Switchyard agent activity</div>
         </div>
-        <div class="status" id="status">idle</div>
+        <div class="view-controls">
+          <button class="active" id="monitor-toggle">⌁ Monitor</button>
+          <button id="health-toggle">▤ Health</button>
+          <button id="refresh-dashboard">⟳ Refresh</button>
+          <span class="status" id="status">Live</span>
+        </div>
       </div>
 
       <div class="content">
-        <section class="chat-section">
-          <h2>Chat History</h2>
-          <div class="history" id="history"></div>
+        <section class="dashboard-view" id="dashboard-view">
+          <div class="dashboard-stats" id="dashboard-stats"></div>
+          <div class="dashboard-columns">
+            <section class="dashboard-panel">
+              <div class="panel-heading"><h2>Active Agents</h2><button data-goto="agents">View board →</button></div>
+              <div class="agent-tree" id="dashboard-agent-tree"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading"><h2>Recent Activity</h2><button data-goto="activity">View all →</button></div>
+              <div class="activity-feed" id="dashboard-activity"></div>
+            </section>
+          </div>
         </section>
 
-        <section>
-          <h2>Files Touched</h2>
-          <div class="files" id="files"></div>
+        <section class="page-view hidden" id="agents-view">
+          <div class="dashboard-panel"><div class="panel-heading"><h2>Agent hierarchy</h2><span class="muted-note">Stable IDs route messages; display names are labels.</span></div><div class="agent-tree" id="agents-page-tree"></div></div>
+        </section>
+        <section class="page-view hidden" id="activity-view"><div class="dashboard-panel"><div class="panel-heading"><h2>Coordination and run events</h2></div><div class="activity-feed" id="activity-page-feed"></div></div></section>
+        <section class="page-view hidden" id="analytics-view">
+          <div class="dashboard-stats" id="analytics-stats"></div>
+          <div class="dashboard-panel"><div class="panel-heading"><h2>Usage by provider and model</h2></div><div id="analytics-table"></div><p class="muted-note">API cost is an estimate from saved token usage and Switchyard’s model price table. Subscription sessions and custom endpoints are excluded; unknown prices are never treated as free.</p></div>
+        </section>
+        <section class="page-view hidden" id="health-view">
+          <div class="dashboard-panel"><div class="panel-heading"><h2>Switchyard health</h2><span class="health-pill" id="health-badge">Checking</span></div><div class="health-grid" id="health-grid"></div></div>
         </section>
 
-        <section class="logs">
-          <div>
-            <h2>Stdout</h2>
-            <pre id="stdout"></pre>
+        <section class="page-view hidden" id="sessions-view">
+          <section class="chat-section">
+            <div class="panel-heading"><h2>Chat History</h2><div class="agent-actions"><button data-goto="dashboard">Dashboard</button></div></div>
+            <div class="history" id="history"></div>
+          </section>
+          <div class="run-composer chat-composer">
+            <div class="project-picker-row"><span aria-hidden="true">▱</span><select id="project-picker" aria-label="Project"><option value="">Choose project</option></select><span id="delivery-status" role="status" aria-live="polite"></span></div>
+            <textarea id="prompt" rows="1" spellcheck="false" placeholder="Do anything" aria-label="Message Switchyard"></textarea>
+            <div class="attachments" id="attachments" aria-label="Attached images"></div>
+            <div class="attachment-hint" id="attachment-hint" aria-live="polite"></div>
+            <div class="toolbar">
+              <div class="composer-options">
+                <button id="attach-image" class="attach-button" aria-label="Attach image" title="Attach image or paste from clipboard">＋</button>
+                <input id="image-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                <label class="permission-control" data-mode="review" title="Permission level"><span aria-hidden="true">⚠</span><select id="permission" aria-label="Permission"><option value="review">Review</option><option value="full">Full access</option><option value="yolo">YOLO mode</option></select></label>
+                <label class="role-control" title="Agent role"><span>Agent</span><select id="agent-role" aria-label="Agent role"><option value="worker">Worker</option><option value="coordinator">Coordinator</option></select></label>
+              </div>
+              <div class="composer-model-controls">
+                <details class="composer-menu" id="model-menu">
+                  <summary><span class="model-status-dot" aria-hidden="true"></span><span id="model-current">Choose model</span><span class="menu-chevron" aria-hidden="true">⌄</span></summary>
+                  <div class="composer-popover model-popover">
+                    <label>Connection<select id="connection" aria-label="Provider or account"></select></label>
+                    <label>Model<select id="model" aria-label="Model" disabled></select></label>
+                    <button type="button" id="refresh-models">Refresh models</button>
+                    <span class="model-hint" id="model-hint" aria-live="polite">Loading available models…</span>
+                  </div>
+                </details>
+                <details class="composer-menu effort-menu" id="effort-menu">
+                  <summary><span id="effort-current">High</span><span class="menu-chevron" aria-hidden="true">⌄</span></summary>
+                  <div class="composer-popover effort-popover">
+                    <label for="effort">Reasoning effort</label>
+                    <select id="effort" aria-label="Reasoning effort"></select>
+                    <p>Higher effort may use more tokens and take longer.</p>
+                  </div>
+                </details>
+                <button id="send" aria-label="Send message" title="Send">↑</button>
+              </div>
+            </div>
           </div>
-          <div>
-            <h2>Stderr</h2>
-            <pre id="stderr"></pre>
-          </div>
+          <details class="chat-run-details">
+            <summary>Run details and files</summary>
+            <section><h2>Files touched</h2><div class="files" id="files"></div></section>
+            <section class="logs"><div><h2>Stdout</h2><pre id="stdout"></pre></div><div><h2>Stderr</h2><pre id="stderr"></pre></div></section>
+          </details>
         </section>
       </div>
     </main>
@@ -504,9 +781,25 @@
     </div>
   </dialog>
 
+  <script src="vendor/markdown.js"></script>
+  <script src="icons.js"></script>
+  <script src="transcript-ui.js"></script>
   <script>
     const promptEl = document.querySelector("#prompt");
     const permissionEl = document.querySelector("#permission");
+    const agentRoleEl = document.querySelector("#agent-role");
+    const permissionControlEl = document.querySelector(".permission-control");
+    const connectionEl = document.querySelector("#connection");
+    const modelEl = document.querySelector("#model");
+    const modelHintEl = document.querySelector("#model-hint");
+    const modelCurrentEl = document.querySelector("#model-current");
+    const modelMenuEl = document.querySelector("#model-menu");
+    const effortMenuEl = document.querySelector("#effort-menu");
+    const effortEl = document.querySelector("#effort");
+    const effortCurrentEl = document.querySelector("#effort-current");
+    const attachmentsEl = document.querySelector("#attachments");
+    const attachmentHintEl = document.querySelector("#attachment-hint");
+    const imageFilesEl = document.querySelector("#image-files");
     const sendEl = document.querySelector("#send");
     const sessionsEl = document.querySelector("#sessions");
     const runsEl = document.querySelector("#runs");
@@ -529,6 +822,24 @@
     let selectedSessionPath = "";
     let currentSession = null;
     let renderedHistoryKey = "";
+    let dashboard = null;
+    let currentPage = "sessions";
+    let connections = [];
+    let selectedBackend = "api";
+    let selectedProvider = "deepseek";
+    let selectedModel = "";
+    let selectedEffort = "high";
+    let attachedImages = [];
+    let modelRequestId = 0;
+
+    const pageInfo = {
+      dashboard: ["Dashboard", "Live overview of Switchyard agent activity"],
+      agents: ["Agents", "Agent hierarchy and coordination status"],
+      sessions: ["New chat", "Ask Switchyard anything about your workspace"],
+      activity: ["Activity Feed", "Recent agent coordination and run events"],
+      analytics: ["Analytics", "Token usage and estimated API cost"],
+      health: ["Health", "Switchyard paths and runtime status"]
+    };
 
     function shortId(id) {
       return id ? id.slice(0, 8) : "";
@@ -554,36 +865,167 @@
           selectedRunId = run.id;
           selectedSessionPath = run.sessionPath || selectedSessionPath;
           if (run.session) currentSession = run.session;
+          agentRoleEl.value = run.agentRole || currentSession?.agentRole || "worker";
           render();
         });
         runsEl.appendChild(item);
       }
     }
 
+    const collapsedChatGroups = new Set();
+    let projects = [];
+    let selectedProjectId = localStorage.getItem('switchyard-project') || '';
+    let pendingSubmission = null;
+    let lastDelivery = null;
+    const projectPicker = document.querySelector('#project-picker');
+    const deliveryStatus = document.querySelector('#delivery-status');
+    function showDelivery(state, text) { deliveryStatus.dataset.state = state; deliveryStatus.textContent = text; }
+    function sessionProject(session) {
+      return projects.find(project => chatPathKey(project.workspace) === chatPathKey(session?.workspace) && chatPathKey(project.coordDir) === chatPathKey(session?.coordDir));
+    }
+    function renderProjectPicker() {
+      const project = sessionProject(currentSession);
+      if (project) selectedProjectId = project.id;
+      projectPicker.replaceChildren(new Option('Choose project', ''), ...projects.map(project => new Option(project.name, project.id)));
+      projectPicker.value = selectedProjectId;
+      projectPicker.disabled = Boolean(selectedSessionPath);
+      projectPicker.title = projects.find(project => project.id === selectedProjectId)?.workspace || 'Choose a project working directory';
+    }
+    async function refreshProjects() {
+      projects = await window.deepseekUi.listProjects();
+      renderProjectPicker();
+      renderSessions();
+    }
+    projectPicker.addEventListener('change', async () => {
+      selectedProjectId = projectPicker.value;
+      localStorage.setItem('switchyard-project', selectedProjectId);
+      if (selectedProjectId) await window.deepseekUi.selectProject(selectedProjectId);
+    });
+    document.querySelector('#new-project').addEventListener('click', async () => {
+      try {
+        const project = await window.deepseekUi.createProject();
+        if (!project) return;
+        selectedProjectId = project.id;
+        localStorage.setItem('switchyard-project', selectedProjectId);
+        await window.deepseekUi.selectProject(project.id);
+        document.querySelector('[data-action="new-chat"]').click();
+        await refreshProjects();
+      } catch (error) { showDelivery('failed', error.message); }
+    });
+    const expandedChatGroups = new Set();
+    const chatPathKey = value => String(value || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const chatFolderName = value => String(value || "").replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop();
+
     function renderSessions() {
       sessionsEl.innerHTML = "";
-      if (!sessions.length) {
-        sessionsEl.innerHTML = '<div class="meta">No saved sessions.</div>';
+      const query = document.querySelector("#session-search").value.trim().toLocaleLowerCase();
+      const allSessions = [...sessions];
+      for (const run of runs.filter(run => run.status === "running" && run.sessionPath)) {
+        if (!allSessions.some(session => chatPathKey(session.path) === chatPathKey(run.sessionPath))) {
+          allSessions.unshift({ ...run.session, path: run.sessionPath, title: run.session?.title || run.prompt || "New chat", coordDir: run.coordDir, workspace: run.workspace, agentRole: run.agentRole });
+        }
+      }
+      const visibleSessions = allSessions.filter(session => !query || `${session.title} ${session.provider} ${session.model} ${session.workspace} ${session.coordDir} ${session.agentRole}`.toLocaleLowerCase().includes(query));
+      if (!visibleSessions.length && !projects.length) {
+        sessionsEl.innerHTML = `<div class="meta">${sessions.length ? "No matching chats." : "Your chats will appear here."}</div>`;
         return;
       }
-      for (const session of sessions) {
+      const groups = new Map();
+      const groupKey = session => session.coordDir ? `${chatPathKey(session.workspace)}\n${chatPathKey(session.coordDir)}` : '';
+      for (const project of projects) {
+        if (!query || `${project.name} ${project.workspace}`.toLowerCase().includes(query) || visibleSessions.some(session => groupKey(session) === groupKey(project))) {
+          groups.set(groupKey(project), { path: project.coordDir, project, sessions: [] });
+        }
+      }
+      for (const session of visibleSessions) {
+        const key = groupKey(session);
+        if (!groups.has(key)) groups.set(key, { path: session.coordDir, sessions: [] });
+        groups.get(key).sessions.push(session);
+      }
+      for (const [key, group] of groups) {
+        const folder = document.createElement("details");
+        folder.className = "chat-folder";
+        folder.open = Boolean(query) || !collapsedChatGroups.has(key);
+        const names = [...new Set(group.sessions.map(session => chatFolderName(session.workspace)).filter(Boolean))];
+        const leaf = chatFolderName(group.path);
+        const label = group.project?.name || (!key ? "Recent chats" : /^[a-f0-9]{16}$/i.test(leaf) && names.length === 1 ? names[0] : leaf || "Coordination");
+        folder.innerHTML = `<summary title="${escapeHtml(group.path || "Chats without a saved coordination directory")}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2M3 7h17a1 1 0 0 1 1 1l-3 11H3z"/></svg><span>${escapeHtml(label)}</span><small>${group.sessions.length}</small></summary>`;
+        folder.addEventListener("toggle", () => { if (!query) folder.open ? collapsedChatGroups.delete(key) : collapsedChatGroups.add(key); });
+        const list = document.createElement("div");
+        list.className = "chat-folder-list";
+        folder.appendChild(list);
+        sessionsEl.appendChild(folder);
+        if (!group.sessions.length && group.project) {
+          const create = document.createElement('button');
+          create.className = 'chat-show-more'; create.textContent = '+ New chat';
+          create.addEventListener('click', async () => {
+            selectedProjectId = group.project.id;
+            await window.deepseekUi.selectProject(selectedProjectId);
+            document.querySelector('[data-action="new-chat"]').click();
+          });
+          list.appendChild(create);
+        }
+        const limit = query || expandedChatGroups.has(key) ? group.sessions.length : 5;
+        const displayed = group.sessions.slice(0, limit);
+        const selected = group.sessions.find(session => session.path === selectedSessionPath);
+        if (selected && !displayed.includes(selected)) displayed.push(selected);
+      for (const session of displayed) {
+        const run = runs.find(run => chatPathKey(run.sessionPath) === chatPathKey(session.path));
+        const active = session.active || run?.status === 'running';
+        const activity = session.agentState === 'waiting_for_message' ? 'Waiting for a message' : 'Working';
         const item = document.createElement("div");
-        item.className = `session ${session.path === selectedSessionPath ? "active" : ""}`;
+        item.className = `session chat-row ${session.path === selectedSessionPath ? "active" : ""}`;
+        item.title = `${session.title || "Chat"}\n${session.agentRole || "Agent"}${active ? ` · ${activity}` : ""}\n${session.workspace || ""}`;
         item.innerHTML = `
-          <div class="session-title">
-            <span>${escapeHtml(session.title || "Session")}</span>
-            <span>${session.messageCount}</span>
-          </div>
-          <div class="run-meta">${session.permission} · ${session.updatedAt ? new Date(session.updatedAt).toLocaleString() : "unknown"}</div>
+          <button type="button" class="chat-open" ${session.path === selectedSessionPath ? 'aria-current="page"' : ""}><span>${escapeHtml(session.title || "New chat")}</span><small class="chat-role">${session.agentRole === 'coordinator' ? 'C' : 'W'}</small>${active ? `<span class="chat-spinner" role="status" aria-label="${activity}" title="${activity}"></span>` : ""}</button>
+          <button type="button" class="session-rename" aria-label="Rename chat" title="Rename chat">✎</button>
         `;
-        item.addEventListener("click", async () => {
-          selectedRunId = null;
+        item.querySelector(".chat-open").addEventListener("click", async () => {
+          selectedRunId = run?.id || null;
           selectedSessionPath = session.path;
-          currentSession = await window.deepseekUi.readSession(session.path);
+          try { currentSession = await window.deepseekUi.readSession(session.path); }
+          catch (error) { if (!run) throw error; currentSession = run.session || null; }
+          if (currentSession) {
+          const project = sessionProject(currentSession);
+          if (project) { selectedProjectId = project.id; await window.deepseekUi.selectProject(project.id); }
           permissionEl.value = ["review", "full", "yolo"].includes(currentSession.permission) ? currentSession.permission : "review";
+          agentRoleEl.value = currentSession.agentRole === "coordinator" ? "coordinator" : "worker";
+          updatePermissionStyle();
+          }
+          const connectionId = ["codex", "claude"].includes(currentSession?.backend) ? currentSession.backend : currentSession?.provider || "deepseek";
+          if (connections.some(item => item.id === connectionId)) {
+            connectionEl.value = connectionId;
+            await selectConnection(connectionId, currentSession?.model || "");
+          }
+          switchPage("sessions");
+          await refreshAgents();
           render();
         });
-        sessionsEl.appendChild(item);
+        item.querySelector(".session-rename").addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const nextTitle = window.prompt("Rename chat", session.title || "");
+          if (nextTitle == null || !nextTitle.trim()) return;
+          try {
+            await window.deepseekUi.renameSession({ path: session.path, title: nextTitle });
+            sessions = await window.deepseekUi.listSessions();
+            if (selectedSessionPath === session.path) {
+              selectedRunId = null;
+              currentSession = await window.deepseekUi.readSession(session.path);
+            }
+            render();
+          } catch (error) {
+            window.alert(`Could not rename chat: ${error.message}`);
+          }
+        });
+        list.appendChild(item);
+      }
+      if (group.sessions.length > displayed.length) {
+        const more = document.createElement("button");
+        more.className = "chat-show-more";
+        more.textContent = `Show more (${group.sessions.length - displayed.length})`;
+        more.addEventListener("click", () => { expandedChatGroups.add(key); renderSessions(); });
+        list.appendChild(more);
+      }
       }
     }
 
@@ -595,6 +1037,306 @@
         '"': "&quot;",
         "'": "&#39;"
       }[ch]));
+    }
+
+    function renderAttachments() {
+      attachmentsEl.replaceChildren();
+      attachedImages.forEach((image, index) => {
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip";
+        const preview = document.createElement("img");
+        preview.src = image.dataUrl;
+        preview.alt = image.name || `Attached image ${index + 1}`;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "×";
+        remove.title = `Remove ${image.name || "image"}`;
+        remove.setAttribute("aria-label", remove.title);
+        remove.addEventListener("click", () => {
+          attachedImages.splice(index, 1);
+          renderAttachments();
+        });
+        chip.append(preview, remove);
+        attachmentsEl.append(chip);
+      });
+      attachmentsEl.hidden = attachedImages.length === 0;
+    }
+
+    function resizePrompt() {
+      promptEl.style.height = "auto";
+      promptEl.style.height = `${Math.min(promptEl.scrollHeight, 200)}px`;
+    }
+
+    function formatModelOption(model) {
+      const price = model.price;
+      const rates = price && price.input != null && price.output != null
+        ? ` · $${price.input}/$${price.output} per 1M in/out`
+        : "";
+      return `${model.label || model.id}${rates}`;
+    }
+
+    function updateConnectionLock(session = currentSession) {
+      const sessionBackend = session?.backend || "api";
+      for (const option of connectionEl.options) {
+        const optionBackend = ["codex", "claude"].includes(option.value) ? option.value : "api";
+        option.disabled = Boolean(session && (sessionBackend === "api" ? optionBackend !== "api" : optionBackend !== sessionBackend));
+      }
+      connectionEl.disabled = Boolean(session && sessionBackend !== "api");
+      agentRoleEl.disabled = selectedBackend !== "api";
+      agentRoleEl.title = selectedBackend === "api" ? "Choose whether this Switchyard API session coordinates workers." : "Coordinator role is available for Switchyard API sessions.";
+    }
+
+    function updatePermissionStyle() {
+      permissionControlEl.dataset.mode = permissionEl.value;
+    }
+
+    function updateModelSummary() {
+      const connection = connections.find(item => item.id === connectionEl.value);
+      const model = selectedModel || modelEl.value;
+      modelCurrentEl.textContent = model || "Choose model";
+      modelCurrentEl.title = connection?.label ? `${connection.label} · ${model}` : model;
+      modelMenuEl.querySelector("summary").setAttribute("aria-label", `Choose model; ${connection?.label || "Connection"}, ${model || "no model selected"}`);
+    }
+
+    function updateEffortChoices() {
+      const supported = selectedBackend !== "api" ? []
+        : selectedProvider === "reflection" ? ["low", "medium", "high", "xhigh", "max"]
+        : ["high", "max"];
+      effortMenuEl.hidden = supported.length === 0;
+      effortEl.replaceChildren(...supported.map(value => new Option(value === "xhigh" ? "Extra high" : value[0].toUpperCase() + value.slice(1), value)));
+      if (!supported.includes(selectedEffort)) selectedEffort = "high";
+      if (supported.length) effortEl.value = selectedEffort;
+      effortCurrentEl.textContent = effortEl.selectedOptions[0]?.textContent || "Default";
+    }
+
+    async function selectConnection(connectionId, preferredModel = "") {
+      const requestId = ++modelRequestId;
+      selectedBackend = ["codex", "claude"].includes(connectionId) ? connectionId : "api";
+      selectedProvider = selectedBackend === "api" ? connectionId : "";
+      selectedModel = preferredModel || "";
+      updateEffortChoices();
+      updateModelSummary();
+      modelEl.disabled = true;
+      modelEl.replaceChildren(new Option("Loading available models…", ""));
+      modelHintEl.textContent = "Checking sign-in and provider model catalog…";
+      updateConnectionLock();
+      try {
+        const result = await window.deepseekUi.listModels(connectionId);
+        if (requestId !== modelRequestId) return;
+        selectedBackend = result.backend;
+        selectedProvider = result.provider || "";
+        const choices = result.models || [];
+        const connection = connections.find(item => item.id === connectionId);
+        if (connection) connection.models = choices;
+        modelEl.replaceChildren();
+        for (const model of choices) {
+          const option = new Option(formatModelOption(model), model.id);
+          option.title = model.description || model.id;
+          modelEl.add(option);
+        }
+        if (preferredModel && !choices.some(item => item.id === preferredModel)) {
+          modelEl.add(new Option(`${preferredModel} · current session model`, preferredModel));
+        }
+        if (!modelEl.options.length) modelEl.add(new Option("No models available", ""));
+        selectedModel = preferredModel && [...modelEl.options].some(option => option.value === preferredModel)
+          ? preferredModel
+          : modelEl.options[0].value;
+        modelEl.value = selectedModel;
+        modelEl.disabled = modelEl.options.length < 2;
+        updateModelHint();
+        updateModelSummary();
+        updateConnectionLock();
+      } catch (error) {
+        if (requestId !== modelRequestId) return;
+        modelEl.replaceChildren(new Option(preferredModel ? `${preferredModel} · current session model` : "Model list unavailable", preferredModel));
+        selectedModel = preferredModel || "";
+        modelEl.disabled = !preferredModel;
+        modelHintEl.textContent = error.message || "Could not load this model catalog.";
+        updateModelSummary();
+      }
+    }
+
+    function updateModelHint() {
+      const connection = connections.find(item => item.id === connectionEl.value);
+      const current = connection?.models?.find(item => item.id === modelEl.value);
+      modelHintEl.textContent = current?.description || connection?.description || "Choose a model for this chat.";
+      selectedModel = modelEl.value;
+      updateModelSummary();
+    }
+
+    async function loadConnections() {
+      connections = await window.deepseekUi.listConnections();
+      connectionEl.replaceChildren(...connections.map(item => {
+        const option = new Option(item.label, item.id);
+        option.title = item.description || item.label;
+        return option;
+      }));
+      const preferred = currentSession
+        ? ((["codex", "claude"].includes(currentSession.backend) ? currentSession.backend : currentSession.provider) || "deepseek")
+        : "deepseek";
+      connectionEl.value = connections.some(item => item.id === preferred) ? preferred : connections[0]?.id || "deepseek";
+      updateConnectionLock();
+      await selectConnection(connectionEl.value, currentSession?.model || "");
+    }
+
+    async function addImageFile(file) {
+      if (!file || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
+        attachmentHintEl.textContent = "Use a PNG, JPEG, WebP, or GIF image.";
+        return;
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        attachmentHintEl.textContent = "Each image must be smaller than 8 MB.";
+        return;
+      }
+      if (attachedImages.length >= 8) {
+        attachmentHintEl.textContent = "Attach up to 8 images per message.";
+        return;
+      }
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Could not read the pasted image."));
+        reader.readAsDataURL(file);
+      });
+      attachedImages.push({ name: file.name || `image-${attachedImages.length + 1}`, type: file.type, dataUrl });
+      attachmentHintEl.textContent = "";
+      renderAttachments();
+    }
+
+    function compactNumber(value) {
+      return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
+    }
+
+    function money(value) {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(value) || 0);
+    }
+
+    function renderStats(target, cards) {
+      target.innerHTML = cards.map(([label, value, foot]) => `
+        <article class="stat-card"><span class="stat-label">${escapeHtml(label)}</span><strong class="stat-value">${escapeHtml(value)}</strong><span class="stat-foot">${escapeHtml(foot)}</span></article>
+      `).join("");
+    }
+
+    function statusBadge(agent) {
+      const state = agent.live ? (agent.state === "waiting_for_message" ? "Waiting" : "Active") : "Stopped";
+      const cls = agent.live ? (agent.state === "waiting_for_message" ? "parked" : "working") : "stopped";
+      return `<span class="badge ${cls}">${state}</span>`;
+    }
+
+    function renderAgentTree(target, source) {
+      const visible = source.filter(agent => agent.agentId !== "ui" && agent.agentId !== "cli" && agent.role !== "operator");
+      if (!visible.length) {
+        target.innerHTML = '<div class="meta">No coordination agents found yet.</div>';
+        return;
+      }
+      const byId = new Map(visible.map(agent => [agent.agentId, agent]));
+      const children = new Map();
+      for (const agent of visible) {
+        const parent = byId.has(agent.coordinatorId) ? agent.coordinatorId : "";
+        if (!children.has(parent)) children.set(parent, []);
+        children.get(parent).push(agent);
+      }
+      for (const list of children.values()) list.sort((a, b) => (a.displayName || a.agentId).localeCompare(b.displayName || b.agentId));
+      const rows = [];
+      const visit = (agent, depth, seen) => {
+        if (seen.has(agent.agentId)) return;
+        const nextSeen = new Set(seen).add(agent.agentId);
+        const name = agent.displayName || agent.agentId;
+        const meta = [agent.role || "worker", agent.provider && agent.model ? `${agent.provider} · ${agent.model}` : agent.model || agent.provider, agent.sessionTitle].filter(Boolean).join(" · ");
+        rows.push(`<button class="tree-agent ${depth ? "child" : ""}" style="margin-left:${Math.min(depth, 5) * 22}px" data-agent-session="${escapeHtml(agent.sessionPath || "")}" title="${escapeHtml(agent.agentId)}">
+          <span class="tree-top"><span class="tree-name">${escapeHtml(name)}</span>${statusBadge(agent)}</span>
+          <span class="tree-sub">${escapeHtml(meta || "No session linked")} · ${escapeHtml(agent.agentId)}</span>
+        </button>`);
+        for (const child of children.get(agent.agentId) || []) visit(child, depth + 1, nextSeen);
+      };
+      for (const agent of children.get("") || []) visit(agent, 0, new Set());
+      for (const agent of visible) if (!rows.some(row => row.includes(`title="${escapeHtml(agent.agentId)}"`))) visit(agent, 0, new Set());
+      target.innerHTML = rows.join("");
+      target.querySelectorAll("[data-agent-session]").forEach(row => row.addEventListener("click", async () => {
+        const path = row.dataset.agentSession;
+        if (!path) return;
+        const session = sessions.find(item => item.path === path);
+        if (session) {
+          selectedRunId = null;
+          selectedSessionPath = path;
+          currentSession = await window.deepseekUi.readSession(path);
+          agentRoleEl.value = currentSession.agentRole === "coordinator" ? "coordinator" : "worker";
+          switchPage("sessions");
+          render();
+        }
+      }));
+    }
+
+    function renderActivity(target, entries) {
+      if (!entries.length) {
+        target.innerHTML = '<div class="meta">No recent activity.</div>';
+        return;
+      }
+      target.innerHTML = entries.map(event => {
+        const stamp = event.createdAt ? new Date(event.createdAt).toLocaleString() : "time unknown";
+        return `<article class="activity-row"><div class="activity-top"><strong>${escapeHtml(event.label)}</strong><span class="badge ${event.source === "run" ? "parked" : "working"}">${escapeHtml(event.source)}</span></div><div class="activity-sub">${escapeHtml(stamp)}</div></article>`;
+      }).join("");
+    }
+
+    function renderDashboard() {
+      if (!dashboard) return;
+      const m = dashboard.metrics;
+      const costValue = m.pricedTurns ? `${money(m.estimatedCost)} est.` : "—";
+      const costFoot = m.pricedTurns ? `${m.pricedTurns} priced turns · ${m.unpricedTurns} excluded` : "No priced API usage recorded";
+      renderStats(document.querySelector("#dashboard-stats"), [
+        ["Total sessions", compactNumber(m.totalSessions), "Saved Switchyard sessions"],
+        ["Active agents", compactNumber(m.activeAgents), "Live coordination agents"],
+        ["Active subagents", compactNumber(m.activeSubagents), "Live agents with a coordinator"],
+        ["Events today", compactNumber(m.eventsToday), "Coordination events today"],
+        ["Total events", compactNumber(m.totalEvents), "Recorded coordination events"],
+        ["Total cost", costValue, costFoot]
+      ]);
+      renderAgentTree(document.querySelector("#dashboard-agent-tree"), dashboard.agents || []);
+      renderActivity(document.querySelector("#dashboard-activity"), dashboard.recentActivity || []);
+      renderAgentTree(document.querySelector("#agents-page-tree"), dashboard.agents || []);
+      renderActivity(document.querySelector("#activity-page-feed"), dashboard.recentActivity || []);
+
+      renderStats(document.querySelector("#analytics-stats"), [
+        ["Tokens", compactNumber(m.totalTokens), `${compactNumber(m.inputTokens)} in · ${compactNumber(m.outputTokens)} out`],
+        ["Cached input", compactNumber(m.cachedTokens), "Included in input totals"],
+        ["Estimated API cost", m.pricedTurns ? money(m.estimatedCost) : "—", costFoot]
+      ]);
+      const table = document.querySelector("#analytics-table");
+      table.innerHTML = dashboard.models?.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Provider</th><th>Model</th><th>Sessions</th><th>Tokens</th><th>Estimated API cost</th><th>Coverage</th></tr></thead><tbody>${dashboard.models.map(row => `<tr><td>${escapeHtml(row.provider)}</td><td>${escapeHtml(row.model)}</td><td>${compactNumber(row.sessions)}</td><td>${compactNumber(row.tokens)}</td><td>${row.pricedTurns ? money(row.estimatedCost) : "—"}</td><td>${row.pricedTurns} priced · ${row.unpricedTurns} unknown</td></tr>`).join("")}</tbody></table></div>` : '<div class="meta">No token usage is available in saved sessions yet.</div>';
+
+      const health = dashboard.health || {};
+      const healthy = health.coordinationAvailable;
+      const badge = document.querySelector("#health-badge");
+      badge.textContent = healthy ? "Operational" : "Coordination unavailable";
+      badge.classList.toggle("warn", !healthy);
+      const healthItems = [
+        ["Workspace", health.workspace], ["Data root", health.dataRoot], ["Sessions", health.sessionRoot],
+        ["Coordination", health.coordinationRoot], ["Active runs", health.activeRuns],
+        ["Coordination status", healthy ? "Available" : health.coordinationError || "Unavailable"]
+      ];
+      document.querySelector("#health-grid").innerHTML = healthItems.map(([label, value]) => `<div class="health-item"><span class="stat-label">${escapeHtml(label)}</span><div>${escapeHtml(value ?? "—")}</div></div>`).join("");
+    }
+
+    function switchPage(page) {
+      if (!pageInfo[page]) return;
+      currentPage = page;
+      document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === page));
+      document.querySelector("#dashboard-view").classList.toggle("hidden", page !== "dashboard");
+      document.querySelectorAll(".page-view").forEach(view => view.classList.toggle("hidden", view.id !== `${page}-view`));
+      titleEl.textContent = page === "sessions" ? currentSession?.title || "New chat" : pageInfo[page][0];
+      runMetaEl.textContent = page === "sessions" && currentSession ? `${currentSession.provider || "Switchyard"}${currentSession.model ? ` · ${currentSession.model}` : ""}` : pageInfo[page][1];
+      document.querySelector("#monitor-toggle").classList.toggle("active", page !== "health");
+      document.querySelector("#health-toggle").classList.toggle("active", page === "health");
+    }
+
+    async function refreshDashboard(force = false) {
+      try {
+        dashboard = force ? await window.deepseekUi.refreshDashboard() : await window.deepseekUi.dashboard();
+        renderDashboard();
+        if (currentPage === "dashboard" || currentPage === "health") statusEl.textContent = "Live";
+      } catch (error) {
+        statusEl.textContent = `Dashboard error: ${error.message}`;
+      }
     }
 
     function isHistoryNearBottom() {
@@ -611,65 +1353,170 @@
       });
     }
 
-    function renderMessages(session) {
+    function activityLabel(name) {
+      if (/browser|browse|pbc/i.test(name)) return "Used the browser";
+      if (/search|fetch|web/i.test(name)) return "Searched the web";
+      if (/write|edit|patch/i.test(name)) return "Edited files";
+      if (/read|list.*file|glob|grep/i.test(name)) return "Read files";
+      if (/cmd|shell|exec|terminal/i.test(name)) return "Ran commands";
+      return "Used tools";
+    }
+
+    function transcriptBlocks(messages) {
+      const blocks = [];
+      const calls = new Map();
+      let activity = null;
+      for (const [index, message] of messages.entries()) {
+        if (message.role === "tool") {
+          const call = calls.get(message.toolCallId);
+          if (call) call.result = message.content || "No output";
+          else {
+            if (!activity) { activity = { kind: "activity", key: String(index), tools: [] }; blocks.push(activity); }
+            activity.tools.push({ name: "Tool result", result: message.content || "No output" });
+          }
+          continue;
+        }
+        if (message.role === "user" || String(message.content || "").trim()) {
+          activity = null;
+          if (String(message.content || "").trim()) blocks.push({ kind: "message", role: message.role, content: message.content });
+        }
+      for (const call of message.toolCalls || []) {
+          if (!activity) { activity = { kind: "activity", key: String(index), tools: [] }; blocks.push(activity); }
+          const tool = { name: call.name || "Tool", arguments: call.arguments };
+          activity.tools.push(tool);
+          if (call.id) calls.set(call.id, tool);
+        }
+      }
+      return blocks;
+    }
+
+    function renderMessages(session, runStatus = "complete") {
+      const coordinationMessages = session?.coordinationMessages || [];
       const historyKey = [
         session?.path || "",
+        runStatus,
+        JSON.stringify(session?.touchedFiles || []),
         session?.updatedAt || "",
         session?.messages?.length || 0,
         session?.messages?.at(-1)?.content || "",
-        session?.messages?.at(-1)?.toolCalls?.length || 0
+        session?.messages?.at(-1)?.toolCalls?.length || 0,
+        coordinationMessages.map((message) => `${message.id}:${message.deliveryState}:${message.body}`).join(";")
       ].join("|");
       if (historyKey === renderedHistoryKey) return;
       renderedHistoryKey = historyKey;
       const shouldStickToBottom = isHistoryNearBottom();
+      const expandedActivity = new Set([...historyEl.querySelectorAll(".activity-group[open]")].map(el => el.dataset.activityKey));
       historyEl.innerHTML = "";
-      if (!session?.messages?.length) {
+      if (!session?.messages?.length && !coordinationMessages.length) {
         historyEl.innerHTML = '<div class="output">No chat history yet.</div>';
         maybeScrollHistory(shouldStickToBottom, false);
         return;
       }
-      for (const message of session.messages) {
+      for (const block of transcriptBlocks(session?.messages || [])) {
+        if (block.kind === "activity") {
+          const group = document.createElement("details");
+          group.className = "activity-group";
+          group.dataset.activityKey = block.key;
+          group.open = expandedActivity.has(block.key);
+          const labels = [...new Set(block.tools.map(tool => activityLabel(tool.name)))];
+          group.innerHTML = `<summary>${TranscriptUI.icon("tool")}${escapeHtml(labels.join(", "))} · ${block.tools.length} ${block.tools.length === 1 ? "tool" : "tools"}</summary><div class="activity-list">${block.tools.map(tool => `<details class="activity-item"><summary title="${escapeHtml(tool.name)}">${TranscriptUI.icon(tool.name)}${escapeHtml(tool.name)}</summary><pre>${escapeHtml(tool.arguments || "")}${tool.result !== undefined ? "\n\n" + escapeHtml(tool.result) : ""}</pre></details>`).join("")}</div>`;
+          historyEl.appendChild(group);
+        } else {
+          const el = document.createElement("article");
+          el.className = `message ${block.role}`;
+          const body = document.createElement("div");
+          body.className = "message-body";
+          if (block.role === "assistant") TranscriptUI.renderMarkdown(body, block.content);
+          else body.textContent = block.content;
+          el.appendChild(body);
+          historyEl.appendChild(el);
+        }
+      }
+      const lastMessage = session?.messages?.at(-1);
+      if (!["running", "starting"].includes(runStatus) && lastMessage?.role === "assistant" && lastMessage.content?.trim() && !lastMessage.toolCalls?.length) {
+        const finalArticle = historyEl.querySelector(".message.assistant:last-child");
+        if (finalArticle) TranscriptUI.appendFilesCard(finalArticle, session);
+      }
+      for (const message of coordinationMessages) {
+        const from = String(message.from || "agent");
+        const isUser = ["ui", "operator", "user"].includes(from.toLowerCase());
         const el = document.createElement("article");
-        el.className = `message ${message.role}`;
-        const toolCalls = (message.toolCalls || []).map((call) => `
-          <details class="tool-call">
-            <summary>${escapeHtml(call.name)}</summary>
-            <pre>${escapeHtml(call.arguments)}</pre>
-          </details>
-        `).join("");
-        const reasoning = message.reasoning ? `<details class="tool-call"><summary>reasoning</summary><pre>${escapeHtml(message.reasoning)}</pre></details>` : "";
+        el.className = `message coordination ${isUser ? "user" : "agent"}`;
+        const stamp = message.createdAt ? new Date(message.createdAt).toLocaleString() : "time unknown";
+        const type = message.type && message.type !== "message" ? ` · ${message.type}` : "";
         el.innerHTML = `
           <div class="message-header">
-            <span>${escapeHtml(message.role)}${message.toolCallId ? ` · ${escapeHtml(message.toolCallId)}` : ""}</span>
-            <span>#${message.index + 1}</span>
+            <span>${escapeHtml(from)}${type} · ${escapeHtml(message.deliveryState || "message")}</span>
+            <span>${escapeHtml(stamp)}</span>
           </div>
-          <div class="message-body">${escapeHtml(message.content || "(empty)")}${reasoning}${toolCalls}</div>
+          <div class="message-body">${escapeHtml(message.body || "(empty)")}</div>
         `;
         historyEl.appendChild(el);
       }
       maybeScrollHistory(shouldStickToBottom);
     }
 
+    function hasSubmittedRunPrompt(messages, run) {
+      const baseline = Number(run?.messageCountBefore) || 0;
+      const submittedPrompt = String(run?.prompt || "").trim();
+      if (!submittedPrompt) return false;
+      return messages.slice(baseline).some(message => {
+        if (message.role !== "user") return false;
+        const content = String(message.content || "").trim();
+        return content === submittedPrompt || content.startsWith(`${submittedPrompt}\n\n[The user attached `);
+      });
+    }
+
+    function hasRunAssistantMessage(messages, run) {
+      const start = Math.max(0, Number(run?.messageCountBefore) || 0);
+      return Boolean(run && (messages || []).slice(start).some(message => message.role === "assistant"));
+    }
+
     function renderSelected() {
+      renderProjectPicker();
       const run = runs.find((item) => item.id === selectedRunId);
       const session = run?.session || currentSession;
+      document.querySelector("main").classList.toggle("empty-chat", currentPage === "sessions" && !run && !session);
       if (!run && !session) {
         renderedHistoryKey = "";
-        titleEl.textContent = "No session selected";
-        runMetaEl.textContent = "Select a session to resume it, or send a prompt to start a new one.";
-        statusEl.textContent = "idle";
-        statusEl.className = "status";
-        historyEl.innerHTML = '<div class="output">No chat history yet.</div>';
+        if (currentPage === "sessions") {
+          titleEl.textContent = "New chat";
+          runMetaEl.textContent = "Ask Switchyard anything about your workspace.";
+          statusEl.textContent = "idle";
+          statusEl.className = "status";
+        }
+        historyEl.innerHTML = currentPage === "sessions" ? '<div class="welcome">What can I help with?</div>' : '<div class="output">No chat history yet.</div>';
         filesEl.innerHTML = "";
         stdoutEl.textContent = "";
         stderrEl.textContent = "";
         return;
       }
-      titleEl.textContent = session?.title || `Run ${shortId(run.id)}`;
-      runMetaEl.textContent = `${session?.path || run.sessionPath || run.outputFile} ${run ? `· exit ${run.exitCode ?? "pending"}` : ""}`;
-      statusEl.textContent = run?.status || "ready";
-      statusEl.className = `status ${run?.status || "complete"}`;
-      renderMessages(session || { messages: [{ role: "assistant", content: run.finalResponse || "Running...", index: 0 }] });
+      if (currentPage === "sessions") {
+        titleEl.textContent = session?.title || `Run ${shortId(run.id)}`;
+        runMetaEl.textContent = `${session?.provider || "Switchyard"}${session?.model ? ` · ${session.model}` : ""}${run ? ` · ${run.status}` : ""}`;
+        statusEl.textContent = session?.active ? (session.agentState === 'waiting_for_message' ? 'Waiting for a message' : 'Working') : run?.status || 'ready';
+        statusEl.className = `status ${run?.status || "complete"}`;
+      }
+      let displaySession = session ? { ...session, messages: [...(session.messages || [])] } : {
+        path: run.sessionPath,
+        title: run.prompt || `Run ${shortId(run.id)}`,
+        provider: run.provider,
+        model: run.model,
+        touchedFiles: run.touchedFiles || [],
+        messages: []
+      };
+      if (run?.prompt && !hasSubmittedRunPrompt(displaySession.messages, run)) {
+        displaySession.messages.push({ role: "user", content: run.prompt, index: displaySession.messages.length });
+      }
+      const lastAssistant = [...displaySession.messages].reverse().find(message => message.role === "assistant");
+      const runHasAssistant = hasRunAssistantMessage(displaySession.messages, run);
+      if (run?.liveText?.trim() && !runHasAssistant && String(lastAssistant?.content || "") !== run.liveText) {
+        displaySession.messages.push({ role: "assistant", content: run.liveText, index: displaySession.messages.length, live: true });
+      }
+      if (!displaySession.messages.length && run?.status === "running") {
+        displaySession.messages.push({ role: "assistant", content: "Working…", index: 0, live: true });
+      }
+      renderMessages(displaySession, run?.status || "complete");
       filesEl.innerHTML = "";
       for (const file of session?.touchedFiles || run?.touchedFiles || []) {
         const chip = document.createElement("span");
@@ -730,7 +1577,7 @@
 
     function renderAgents() {
       agentsEl.innerHTML = "";
-      const visible = agents.filter((agent) => agent.agentId !== "ui");
+      const visible = agents.filter((agent) => agent.agentId !== "ui" && agent.agentId !== "cli" && agent.role !== "operator");
       if (!visible.length) {
         agentsEl.innerHTML = '<div class="meta">No coordination agents found.</div>';
         return;
@@ -741,10 +1588,10 @@
         const mission = String(agent.mission || agent.session || "").trim();
         card.innerHTML = `
           <div class="agent-row">
-            <span>${escapeHtml(agent.agentId)}</span>
+            <span>${escapeHtml(agent.displayName || agent.agentId)}</span>
             ${agentBadge(agent)}
           </div>
-          <div class="agent-meta">${escapeHtml(agent.role || "worker")}${mission ? ` · ${escapeHtml(mission.slice(0, 60))}` : ""}</div>
+          <div class="agent-meta">${escapeHtml(agent.agentId)} · ${escapeHtml(agent.role || "worker")}${mission ? ` · ${escapeHtml(mission.slice(0, 60))}` : ""}</div>
           <div class="agent-compose">
             <input type="text" placeholder="Message (wakes parked agents)" spellcheck="false">
             <button>Send</button>
@@ -774,7 +1621,11 @@
       agents = result.agents || [];
       const added = agents.some((agent) => !previous.has(agent.agentId));
       renderAgents();
+      const selectedRun = runs.find((item) => item.id === selectedRunId);
+      const agentId = currentSession?.coordinationAgentId || selectedRun?.session?.coordinationAgentId || "";
+      // readSession returns the inbox from that session's own coordination root.
       if (added) render();
+      else renderSelected();
     }
 
     function render() {
@@ -782,38 +1633,157 @@
       renderRuns();
       renderAgents();
       renderSelected();
+      renderDashboard();
     }
 
-    async function refreshSessions() {
+    async function refreshSessions(selectRecent = false) {
       sessions = await window.deepseekUi.listSessions();
       if (selectedSessionPath) {
         const stillExists = sessions.some((session) => session.path === selectedSessionPath);
         if (stillExists) currentSession = await window.deepseekUi.readSession(selectedSessionPath);
-      } else if (sessions[0]) {
+      } else if (selectRecent && sessions[0]) {
         selectedSessionPath = sessions[0].path;
         currentSession = await window.deepseekUi.readSession(selectedSessionPath);
         permissionEl.value = ["review", "full", "yolo"].includes(currentSession.permission) ? currentSession.permission : "review";
+        agentRoleEl.value = currentSession.agentRole === "coordinator" ? "coordinator" : "worker";
+        updatePermissionStyle();
       }
+      if (currentSession && connections.length) {
+        const connectionId = ["codex", "claude"].includes(currentSession.backend) ? currentSession.backend : currentSession.provider || "deepseek";
+        if (connections.some(item => item.id === connectionId)) {
+          connectionEl.value = connectionId;
+          await selectConnection(connectionId, currentSession.model || "");
+        }
+      }
+      await refreshAgents();
       render();
     }
 
     async function startRun() {
+      const prompt = promptEl.value.trim();
+      if (!prompt && !attachedImages.length) return;
+      if (!selectedSessionPath && !selectedProjectId) { showDelivery('failed', 'Choose a project before sending.'); projectPicker.focus(); return; }
+      if (!selectedModel) {
+        modelHintEl.textContent = "Choose an available model before sending.";
+        return;
+      }
       sendEl.disabled = true;
       try {
-        const run = await window.deepseekUi.startChat({
-          prompt: promptEl.value,
+      const submission = {
+          prompt,
           permission: permissionEl.value,
-          sessionPath: selectedSessionPath
-        });
+          agentRole: agentRoleEl.value,
+          effort: selectedEffort,
+          sessionPath: selectedSessionPath,
+          backend: selectedBackend,
+          provider: selectedProvider,
+          model: selectedModel,
+          images: attachedImages,
+          projectId: selectedProjectId
+        };
+        const fingerprint = JSON.stringify(submission);
+        if (!pendingSubmission || pendingSubmission.fingerprint !== fingerprint) pendingSubmission = { fingerprint, requestId: `${Date.now()}-${crypto.randomUUID()}` };
+        showDelivery('queued', 'Sending…');
+        const run = await window.deepseekUi.startChat({ ...submission, requestId: pendingSubmission.requestId });
+        lastDelivery = { ...run.delivery, sessionPath: run.sessionPath };
+        pendingSubmission = null;
+        showDelivery(run.delivery?.state || 'received', run.delivery?.state === 'queued' ? 'Queued for agent' : 'Received');
+        runs = runs.filter(item => item.id !== run.id);
+        runs.push(run);
         selectedRunId = run.id;
         selectedSessionPath = run.sessionPath || selectedSessionPath;
         if (run.session) currentSession = run.session;
+        switchPage("sessions");
+        promptEl.value = "";
+        resizePrompt();
+        attachedImages = [];
+        renderAttachments();
+        attachmentHintEl.textContent = "";
+        render();
+      } catch (error) {
+        showDelivery('failed', 'Failed — retry to send');
+        attachmentHintEl.textContent = error.message || "Could not start this message.";
       } finally {
         sendEl.disabled = false;
       }
     }
 
     sendEl.addEventListener("click", startRun);
+    promptEl.addEventListener("input", resizePrompt);
+    promptEl.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        startRun();
+      }
+    });
+    promptEl.addEventListener("paste", event => {
+      const imageFiles = [...(event.clipboardData?.items || [])]
+        .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+        .map(item => item.getAsFile())
+        .filter(Boolean);
+      if (!imageFiles.length) return;
+      event.preventDefault();
+      const pastedText = event.clipboardData?.getData("text/plain") || "";
+      if (pastedText) promptEl.setRangeText(pastedText, promptEl.selectionStart, promptEl.selectionEnd, "end");
+      Promise.all(imageFiles.map(addImageFile)).catch(error => { attachmentHintEl.textContent = error.message; });
+    });
+    document.querySelector("#attach-image").addEventListener("click", () => imageFilesEl.click());
+    imageFilesEl.addEventListener("change", async () => {
+      for (const file of imageFilesEl.files || []) await addImageFile(file);
+      imageFilesEl.value = "";
+    });
+    connectionEl.addEventListener("change", () => { modelMenuEl.open = true; selectConnection(connectionEl.value); });
+    modelEl.addEventListener("change", () => { updateModelHint(); modelMenuEl.open = false; });
+    document.querySelector("#refresh-models").addEventListener("click", () => selectConnection(connectionEl.value, modelEl.value));
+    effortEl.addEventListener("change", () => {
+      selectedEffort = effortEl.value;
+      effortCurrentEl.textContent = effortEl.selectedOptions[0]?.textContent || "High";
+      effortMenuEl.open = false;
+    });
+    permissionEl.addEventListener("change", updatePermissionStyle);
+    document.addEventListener("click", event => {
+      if (!modelMenuEl.contains(event.target)) modelMenuEl.open = false;
+      if (!effortMenuEl.contains(event.target)) effortMenuEl.open = false;
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") { modelMenuEl.open = false; effortMenuEl.open = false; }
+    });
+    document.querySelector("#session-search").addEventListener("input", renderSessions);
+    document.querySelector("[data-action='new-chat']").addEventListener("click", () => {
+      selectedRunId = null;
+      selectedSessionPath = "";
+      currentSession = null;
+      renderedHistoryKey = "";
+      pendingSubmission = null;
+      lastDelivery = null;
+      showDelivery('', '');
+      promptEl.value = "";
+      resizePrompt();
+      attachedImages = [];
+      renderAttachments();
+      attachmentHintEl.textContent = "";
+      updateConnectionLock(null);
+      if (connectionEl.value) selectConnection(connectionEl.value);
+      switchPage("sessions");
+      render();
+      promptEl.focus();
+    });
+    document.querySelectorAll("[data-page]").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.page)));
+    document.querySelectorAll("[data-goto]").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.goto)));
+    document.querySelector("#monitor-toggle").addEventListener("click", () => switchPage("dashboard"));
+    document.querySelector("#health-toggle").addEventListener("click", () => switchPage("health"));
+    document.querySelector("#refresh-dashboard").addEventListener("click", async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "⟳ Refreshing";
+      try {
+        await refreshDashboard(true);
+        await refreshSessions();
+      } finally {
+        button.disabled = false;
+        button.textContent = "⟳ Refresh";
+      }
+    });
 
     async function respondToSupport(choice) {
       try {
@@ -825,11 +1795,17 @@
         supportDialog.appendChild(message);
       }
     }
+
     document.querySelector("#support-later").addEventListener("click", () => respondToSupport("later"));
     document.querySelector("#support-donated").addEventListener("click", () => respondToSupport("donated"));
     document.querySelector("#support-open").addEventListener("click", () => respondToSupport("open"));
     supportDialog.addEventListener("cancel", (event) => { event.preventDefault(); respondToSupport("later"); });
 
+    document.querySelectorAll("[data-app-menu]").forEach(button => button.addEventListener("click", () => {
+      const bounds = button.getBoundingClientRect();
+      window.deepseekUi.showAppMenu({ menu: button.dataset.appMenu, x: bounds.left, y: bounds.bottom });
+    }));
+    switchPage(currentPage);
     window.deepseekUi.info().then((info) => {
       metaEl.textContent = `${info.workspace}\nAPI http://127.0.0.1:${info.controlPort} · CDP ${info.cdpPort}`;
     });
@@ -840,21 +1816,58 @@
       runs = initial;
       render();
     });
-    refreshSessions();
+    refreshSessions(true).then(refreshProjects).then(loadConnections).catch(error => { modelHintEl.textContent = error.message; });
     refreshAgents();
+    refreshDashboard(true);
     setInterval(refreshAgents, 5000);
+    setInterval(() => refreshDashboard(false), 10000);
+    let sidebarRefreshPending = false;
+    setInterval(async () => {
+      if (sidebarRefreshPending) return;
+      sidebarRefreshPending = true;
+      try {
+        sessions = await window.deepseekUi.listSessions();
+        const selectedPath = selectedSessionPath;
+        if (selectedPath) {
+          const fresh = await window.deepseekUi.readSession(selectedPath);
+          if (selectedPath === selectedSessionPath) {
+            currentSession = fresh;
+            const run = runs.find(item => item.id === selectedRunId);
+            if (run) { run.session = fresh; if (!fresh.active && run.id.startsWith('agent-')) run.status = 'complete'; }
+            if (lastDelivery?.sessionPath === selectedPath) {
+              const message = fresh.coordinationMessages?.find(message => message.id === lastDelivery.id);
+              if (message?.deliveryState === 'processed') showDelivery('received', 'Received by agent');
+            }
+            renderSelected();
+          }
+        }
+        await refreshProjects();
+        renderSessions();
+      }
+      catch (error) { console.warn("Could not refresh chats", error); }
+      finally { sidebarRefreshPending = false; }
+    }, 5000);
     window.deepseekUi.onRuns((next) => {
       runs = next;
       render();
     });
+    let lastLiveSessionRefresh = 0;
     window.deepseekUi.onRun((run) => {
       runs = runs.map((item) => item.id === run.id ? run : item);
       if (!runs.some((item) => item.id === run.id)) runs.unshift(run);
+      if (selectedRunId !== run.id && chatPathKey(selectedSessionPath) !== chatPathKey(run.sessionPath)) {
+        renderSessions();
+        renderRuns();
+        return;
+      }
       selectedRunId = run.id;
       selectedSessionPath = run.sessionPath || selectedSessionPath;
       if (run.session) currentSession = run.session;
       render();
-      refreshSessions();
+      if (run.status !== "running" || Date.now() - lastLiveSessionRefresh >= 2000) {
+        lastLiveSessionRefresh = Date.now();
+        refreshSessions();
+      }
     });
   </script>
 </body>

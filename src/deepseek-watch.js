@@ -13,7 +13,7 @@ import { contextLimitFor, fetchProviderModels, hasKnownContextLimit, normalizePr
 import { providerStream } from "./provider-transport.js";
 import { DEEPSEEK_TOP_UP_URL, getProviderBalance, isBelowMinimum } from "./provider-balance.js";
 import { deepSeekBudget, formatBudget, unavailableBudget, upsertBudgetContext } from './provider-budget.js';
-import { listSessions, newSession, newSessionPath, readSession, sessionPath, touchSession, writeSession } from "./session-memory.js";
+import { fallbackSessionTitle, listSessions, newSession, newSessionPath, readSession, sessionPath, touchSession, writeSession } from "./session-memory.js";
 import { certLogs, classifyUrl, dnsLookup, fileAnalyze, trackSafetyState, verifyDownload, virusTotalLookup, watchDownloads, whoisLookup } from "./download-safety.js";
 import { runSecurityTool, securityToolSchemas } from "./security_tools.js";
 import { runOffensiveTool, offensiveToolSchemas } from "./offensive_tools.js";
@@ -58,6 +58,11 @@ import { netCaptureStart, netCaptureStatus, netCaptureStop, netConversations, ne
 import { peTriage } from "./triage.js";
 import { resolveWorkspacePath } from "./workspace-paths.js";
 import { PERSONAL_SUPPORT_URL, personalSupportResponse, shouldPromptForPersonalSupport } from "./support-prompt.js";
+import { formatMigrationReport, migrateLegacyData } from "./migration.js";
+import { switchyardDataRoot } from "./data-store.js";
+import { TOOLPACKS, TOOLPACK_DISCOVERY_SCHEMAS, toolpackSchemas, toolpackForTool, slackRequest } from './toolpacks.js';
+import { modelPrice } from './model-pricing.js';
+import { usageTotals } from './ui/dashboard-model.cjs';
 
 const DEFAULT_PROVIDER = "deepseek";
 let workspacePathPolicy = { permission: "ask", agentRole: "worker" };
@@ -73,8 +78,10 @@ function usage() {
 
 Usage:
   switchyard
+  switchyard app
   switchyard -ui [options]
   switchyard doctor
+  switchyard migrate [--dry-run|--copy] [--dest <dir>] [--watch-root <.deepseek-watch dir>]
   switchyard login <codex|claude>
   switchyard auth <codex|claude>
   switchyard --backend codex --tui
@@ -110,7 +117,8 @@ Usage:
   switchyard --stdin [options]
 
 Options:
-  -ui, --ui                   Launch the Electron desktop UI instead of the CLI/TUI.
+  app                         Open the installed Switchyard desktop app.
+  -ui, --ui                   Launch the development Electron UI.
   --ui-port <number>          UI control HTTP port. Default: 17891
   --ui-cdp-port <number>      Electron remote debugging/CDP port. Default: 9223
   -p, --prompt <text>          Prompt content.
@@ -148,10 +156,11 @@ Options:
   --resume                     Resume from --session, or pick a recent session if omitted.
   --new                        Start a fresh session for --agent-id instead of resuming its existing one.
   --agent-id <id>              Stable coordination identity. Default: generated and saved in the session.
+  --agent-name <name>          Human-readable agent name shown in Switchyard views.
   --agent-role <role>          Agent role, such as coordinator or worker. Default: worker
   --agent-mission <text>       Current mission shown to other agents.
   --coordinator-id <id>        Known coordinator to contact first (or DEEPSEEK_COORDINATOR_ID).
-  --coord-dir <dir>            Shared coordination directory. Default: .deepseek-watch/coordination
+  --coord-dir <dir>            Shared coordination directory. Default: central per-workspace board under ~/.switchyard
   --no-save-session            Do not write session memory to disk.
   -o, --output <file>          Write a Markdown result file.
   --outfile <file>             Alias for --output.
@@ -199,6 +208,7 @@ function parseArgs(argv) {
     saveSession: true,
     output: null,
     noOutput: false,
+    uiStream: false,
     fullChat: false,
     resume: false,
     newSession: false,
@@ -210,9 +220,11 @@ function parseArgs(argv) {
     color: process.env.NO_COLOR ? false : process.stdout.isTTY,
     tuiQuiet: process.env.DEEPSEEK_TUI_QUIET === "1",
     agentId: process.env.DEEPSEEK_AGENT_ID || null,
+    agentName: process.env.DEEPSEEK_AGENT_NAME || null,
     agentRole: process.env.DEEPSEEK_AGENT_ROLE || null,
     agentMission: process.env.DEEPSEEK_AGENT_MISSION || "",
     coordinatorId: process.env.DEEPSEEK_COORDINATOR_ID || null,
+    coordinatorIdExplicit: Boolean(process.env.DEEPSEEK_COORDINATOR_ID),
     coordDir: process.env.DEEPSEEK_COORD_DIR || null,
     compactProvider: process.env.DSW_COMPACT_PROVIDER || null,
     compactModel: process.env.DSW_COMPACT_MODEL || null,
@@ -221,6 +233,7 @@ function parseArgs(argv) {
     compactMethod: process.env.DEEPSEEK_COMPACT_METHOD || "auto",
     contextLimit: process.env.DEEPSEEK_CONTEXT_LIMIT ? Number.parseInt(process.env.DEEPSEEK_CONTEXT_LIMIT, 10) : null,
     compactKeepRecent: Number.parseInt(process.env.DSW_COMPACT_KEEP_RECENT || process.env.DEEPSEEK_COMPACT_KEEP_RECENT || "15", 10),
+    compactKeepRecentExplicit: Boolean(process.env.DSW_COMPACT_KEEP_RECENT || process.env.DEEPSEEK_COMPACT_KEEP_RECENT),
     allowedTargets: [],
     scopeFile: null
   };
@@ -277,13 +290,15 @@ function parseArgs(argv) {
     else if (arg === "--resume") opts.resume = true;
     else if (arg === "--new") opts.newSession = true;
     else if (arg === "--agent-id") opts.agentId = next();
+    else if (arg === "--agent-name") opts.agentName = next();
     else if (arg === "--agent-role") opts.agentRole = next();
     else if (arg === "--agent-mission") opts.agentMission = next();
-    else if (arg === "--coordinator-id") opts.coordinatorId = next();
+    else if (arg === "--coordinator-id") { opts.coordinatorId = next(); opts.coordinatorIdExplicit = true; }
     else if (arg === "--coord-dir") opts.coordDir = next();
     else if (arg === "--no-save-session") opts.saveSession = false;
     else if (arg === "-o" || arg === "--output" || arg === "--outfile") opts.output = next();
     else if (arg === "--no-output") opts.noOutput = true;
+    else if (arg === "--ui-stream") opts.uiStream = true;
     else if (arg === "--no-update-check") opts.noUpdateCheck = true;
     else if (arg === "--full-chat") opts.fullChat = true;
     else if (arg === "--dangerously-auto-run-commands") opts.dangerouslyAutoRunCommands = true;
@@ -863,7 +878,7 @@ function label(opts, icon, text, code = "1;36") {
 
 function heading(opts, text, kind = "info") {
   if (opts.ui) { if (!["thinking", "final", "tools"].includes(kind)) opts.ui.add(kind, text); return; }
-  if (opts.noOutput) return;
+  if (opts.noOutput || opts.uiStream) return;
   const styles = {
     thinking: ["2;36", ICONS.thinking],
     final: ["1;32", ICONS.final],
@@ -920,7 +935,7 @@ function formatJsonish(raw, name = "") {
 }
 
 function writeToolCall(opts, name, rawArgs) {
-  if (opts.noOutput) return;
+  if (opts.noOutput || opts.uiStream) return;
   process.stdout.write(`  ${yellow(opts, "▹")} ${bold(opts, name)}\n`);
   let display = formatJsonish(rawArgs, name);
   try {
@@ -931,7 +946,7 @@ function writeToolCall(opts, name, rawArgs) {
 
 function writeToolResult(opts, result, knownPaths = []) {
   if (opts.ui) return;
-  if (opts.noOutput) return;
+  if (opts.noOutput || opts.uiStream) return;
   const text = String(result);
   const display = text.length > 4000 ? `${text.slice(0, 4000)}\n  …` : text;
   const isError = text === "blocked by user" || text.startsWith("Tool error:") || text.startsWith("command error:");
@@ -1571,7 +1586,7 @@ function compactText(value, max = 900) {
 }
 
 function sessionLabel(item, index) {
-  const prompt = item.firstUserPrompt.replace(/\s+/g, " ").slice(0, 70);
+  const prompt = String(item.title || item.firstUserPrompt || "").replace(/\s+/g, " ").slice(0, 70);
   const when = item.updatedAt || item.createdAt || "unknown";
   const permission = `${item.backend && item.backend !== "api" ? `[${item.backend}] ` : ""}${item.permission ? `[${item.permission}]` : ""}`;
   const agent = item.agentId ? ` ${item.agentId}` : "";
@@ -1712,7 +1727,7 @@ async function dashboardOpts() {
           if (!role) continue;
           opts.agentRole = role;
           opts.agentId = generateAgentId(role);
-          const defaultCoordDir = opts.coordDir || ".deepseek-watch/coordination";
+          const defaultCoordDir = opts.coordDir || coordinationRoot();
           const requestedCoordDir = String(await ask(`Shared coordination directory (blank for ${defaultCoordDir}; use the same absolute path for every worktree)`) || "").trim();
           opts.coordDir = coordinationRoot(requestedCoordDir || defaultCoordDir);
           if (role === "coordinator") {
@@ -1793,7 +1808,22 @@ async function findSessionForAgent(agentId) {
   return match ? match.path : null;
 }
 
+const NAME_CHAT_SCHEMA = {
+  type: "function",
+  function: {
+    name: "name_chat",
+    description: "Set a concise, useful title for this conversation. This is the only tool available before the chat is named.",
+    parameters: {
+      type: "object",
+      properties: { title: { type: "string", description: "A short title, no more than 64 characters." } },
+      required: ["title"],
+      additionalProperties: false
+    }
+  }
+};
+
 function toolSchemas(opts) {
+  if (opts.nameChatPending) return [NAME_CHAT_SCHEMA];
   const schemas = [
     {
       type: "function",
@@ -3134,11 +3164,12 @@ function toolSchemas(opts) {
       type: "function",
       function: {
         name: "spawn_agent",
-        description: "COORDINATOR-ONLY. Spawn a NEW agent as a detached background process (non-blocking; this agent keeps working). Pulls the current working directory and the shared --coord-dir. FAILS if agent_id already exists — use resume_agent to resume an existing id instead.",
+        description: "COORDINATOR-ONLY. Spawn a NEW agent as a detached background process (non-blocking; this agent keeps working). Give it a short descriptive display_name (for the UI) and a stable agent_id (for routing). Pulls the current working directory and shared --coord-dir. FAILS if agent_id already exists — use resume_agent to resume an existing id instead.",
         parameters: {
           type: "object",
           properties: {
             agent_id: { type: "string", description: "New stable id. Must NOT already exist in coordination." },
+            display_name: { type: "string", description: "Short human-readable name shown in the Electron agent hierarchy; routing still uses agent_id." },
             role: { type: "string", enum: ["coordinator", "worker"], description: "Default worker." },
             mission: { type: "string" },
             prompt: { type: "string", description: "Initial prompt for the new agent." },
@@ -3146,7 +3177,7 @@ function toolSchemas(opts) {
             model: { type: "string", description: "Any model the chosen provider serves. Call list_models to see what is available; omitting it uses the provider default." },
             permission: { type: "string", enum: ["review", "ask", "full", "yolo"], description: "Default full." }
           },
-          required: ["agent_id", "prompt"],
+          required: ["agent_id", "display_name", "prompt"],
           additionalProperties: false
         }
       }
@@ -3160,6 +3191,7 @@ function toolSchemas(opts) {
           type: "object",
           properties: {
             agent_id: { type: "string" },
+            display_name: { type: "string", description: "Optional display-name update; omitted keeps the existing name." },
             prompt: { type: "string", description: "Prompt appended to the resumed session." },
             mission: { type: "string", description: "Optional mission override for this launch." },
             provider: { type: "string", enum: Object.keys(PROVIDERS), description: "Provider for the resumed agent. Defaults to this agent's own provider." },
@@ -3199,6 +3231,7 @@ function toolSchemas(opts) {
     if (tool.name === 'generate_image_openai') return !caps.imageGeneration && opts.permission !== 'review';
     return true;
   });
+  available.push(...TOOLPACK_DISCOVERY_SCHEMAS, ...toolpackSchemas(opts.sessionObject?.config?.toolpacks));
   if (opts.mcpManager) available.push(...opts.mcpManager.schemas(), ...opts.mcpManager.managementSchemas());
   return available;
 }
@@ -3562,6 +3595,19 @@ function processIsAlive(pid) {
   }
 }
 
+async function managedProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === 'win32') {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const value = String(result.stdout || '').trim();
+    return result.status === 0 && /^\d+$/.test(value) ? value : null;
+  }
+  try {
+    const value = await readFile(`/proc/${pid}/stat`, 'utf8');
+    return value.slice(value.lastIndexOf(')') + 2).split(' ')[19] || null;
+  } catch { return null; }
+}
+
 function managedProcessStorePath() {
   return join(resolve(process.cwd()), ".deepseek-watch", "processes.json");
 }
@@ -3576,7 +3622,7 @@ function normalizeManagedProcessRecord(value) {
   if (typeof value.command !== "string" || typeof value.workdir !== "string") return null;
   if (typeof value.stdout_log !== "string" || typeof value.stderr_log !== "string") return null;
   if (typeof value.started_at !== "string") return null;
-  return { name, pid, shell: value.shell, command: value.command, workdir: value.workdir, stdout_log: value.stdout_log, stderr_log: value.stderr_log, started_at: value.started_at };
+  return { name, pid, shell: value.shell, command: value.command, workdir: value.workdir, stdout_log: value.stdout_log, stderr_log: value.stderr_log, started_at: value.started_at, creation_id: value.creation_id || null };
 }
 
 async function loadManagedProcesses() {
@@ -3611,7 +3657,7 @@ function waitForHttpReady(url, timeoutMs) {
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), Math.min(3000, timeoutMs));
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { signal: controller.signal, redirect: 'error' });
         clearTimeout(timer);
         if (response.ok) return resolvePromise({ ready: true, status: response.status });
       } catch {}
@@ -3641,6 +3687,8 @@ async function manageProcess(args) {
   if (action === "stop") {
     if (!existing) return { name, found: false, stopped: false };
     if (processIsAlive(existing.pid)) {
+      const identity = await managedProcessIdentity(existing.pid);
+      if (!identity || !existing.creation_id || identity !== existing.creation_id) throw new Error('Managed process ownership cannot be verified (legacy record or reused PID). Inspect the process manually; no signal was sent.');
       if (process.platform === "win32") {
         await new Promise((resolvePromise) => {
           const killer = spawn("taskkill.exe", ["/pid", String(existing.pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
@@ -3651,6 +3699,8 @@ async function manageProcess(args) {
         try { process.kill(-existing.pid, "SIGTERM"); } catch { try { process.kill(existing.pid, "SIGTERM"); } catch {} }
       }
     }
+    for (let attempt = 0; attempt < 20 && processIsAlive(existing.pid); attempt++) await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+    if (processIsAlive(existing.pid)) throw new Error(`Managed process '${name}' is still running; stop was not confirmed.`);
     managedProcesses.delete(name);
     await saveManagedProcesses();
     return { name, found: true, stopped: true };
@@ -3670,11 +3720,12 @@ async function manageProcess(args) {
   const stderrFd = openSync(stderrPath, "a");
   const child = spawn(
     shell === "cmd" ? "cmd.exe" : "powershell.exe",
-    shell === "cmd" ? ["/d", "/s", "/c", command] : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-    { cwd, detached: true, windowsHide: true, stdio: ["ignore", stdoutFd, stderrFd] }
+    shell === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+    { cwd, detached: true, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' && process.platform === 'win32', stdio: ["ignore", stdoutFd, stderrFd] }
   );
   closeSync(stdoutFd);
   closeSync(stderrFd);
+  await new Promise((resolvePromise, reject) => { child.once('spawn', resolvePromise); child.once('error', reject); });
   child.unref();
   const record = {
     name,
@@ -3684,7 +3735,8 @@ async function manageProcess(args) {
     workdir: relative(resolve(process.cwd()), cwd).replaceAll("\\", "/") || ".",
     stdout_log: relative(resolve(process.cwd()), stdoutPath).replaceAll("\\", "/"),
     stderr_log: relative(resolve(process.cwd()), stderrPath).replaceAll("\\", "/"),
-    started_at: nowIso()
+    started_at: nowIso(),
+    creation_id: await managedProcessIdentity(child.pid)
   };
   managedProcesses.set(name, record);
   await saveManagedProcesses();
@@ -4109,11 +4161,113 @@ function handoffCliArgs(cli, prompt, promptFile, cliArgs) {
 }
 
 async function runTool(opts, name, args) {
+  if (name === "name_chat") {
+    const session = opts.sessionObject;
+    if (!session?.config?.chatNamingPending) throw new Error("This chat has already been named.");
+    const title = String(args.title || "").replace(/\s+/g, " ").trim().slice(0, 64).trim();
+    if (!title) throw new Error("title must contain at least one non-space character.");
+    session.title = title;
+    session.titleSource = "model";
+    session.titleSetAt = new Date().toISOString();
+    session.config.chatNamingPending = false;
+    if (opts.saveSession) await writeSession(opts.session, touchSession(session));
+    return jsonResult({ title, saved: true });
+  }
+  if (opts.sessionObject?.config?.chatNamingPending) {
+    throw new Error("Chat naming must complete before other tools are available.");
+  }
+  if (name === 'list_toolpacks') {
+    const loaded = opts.sessionObject?.config?.toolpacks || [];
+    return jsonResult(Object.entries(TOOLPACKS).map(([name, pack]) => ({ name, description: pack.description, loaded: loaded.includes(name), tools: pack.schemas.map(schema => schema.function.name) })));
+  }
+  if (name === 'load_toolpack') {
+    if (!Object.hasOwn(TOOLPACKS, args.name)) throw new Error('Unknown toolpack. Use list_toolpacks.');
+    const session = activeSession(opts);
+    session.config ||= {};
+    session.config.toolpacks = [...new Set([...(session.config.toolpacks || []), args.name])];
+    opts.compactToolTokens = estimateTokens(JSON.stringify(toolSchemas(opts)));
+    if (opts.saveSession) await writeSession(opts.session, touchSession(session));
+    return jsonResult({ loaded: args.name, tools: TOOLPACKS[args.name].schemas.map(schema => schema.function.name), available: 'next model request' });
+  }
+  const requiredPack = toolpackForTool(name);
+  if (requiredPack && !opts.sessionObject?.config?.toolpacks?.includes(requiredPack)) throw new Error(`Load the '${requiredPack}' toolpack before using ${name}.`);
+  if (name === 'slack') {
+    if (args.action === 'send') {
+      if (opts.permission === 'review') return 'blocked by session permission: review only';
+      if (opts.noOutput) return 'blocked: Slack sends require interactive user confirmation';
+      if (!await askYesNo(`Send this Slack message to ${args.channel}${args.thread_ts ? ` (thread ${args.thread_ts})` : ''}?\n${String(args.text || '').slice(0, 12000)}`)) return 'blocked by user';
+    }
+    return jsonResult(await slackRequest(args));
+  }
+  if (name === 'project_checks') {
+    const available = await packageScriptNames();
+    const suggested = ['lint', 'typecheck', 'check', 'test', 'build'].filter(script => available.includes(script));
+    if (!args.action || args.action === 'discover') return jsonResult({ runner: 'npm', available_scripts: available, suggested_scripts: suggested, executed: false });
+    if (args.action !== 'run') throw new Error('action must be discover or run.');
+    const scripts = args.scripts || suggested;
+    if (!Array.isArray(scripts) || scripts.length > 10 || scripts.some(script => !available.includes(script) || !/^[a-zA-Z0-9:_-]+$/.test(script))) throw new Error('Select at most 10 existing npm scripts from project_checks discover.');
+    if (opts.permission === 'review') return 'blocked by session permission: review only';
+    if (!['full', 'yolo'].includes(opts.permission) && !opts.dangerouslyAutoRunCommands) {
+      if (opts.noOutput) return 'blocked by no-output mode';
+      if (!await askYesNo(`Run npm scripts: ${scripts.join(', ')}?`)) return 'blocked by user';
+    }
+    const result = await runNamedPackageScripts(scripts, Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000));
+    return jsonResult({ ...result, passed: result.found ? result.results.every(entry => /^exit_code=0(?:\n|$)/.test(entry.result)) : null });
+  }
+  if (name === 'git_review') {
+    const scope = resolveGitScope(args.path);
+    const suffix = scope.pathspec ? ['--', scope.pathspec] : [];
+    const commands = { status: ['status', '--short', '--branch'], unstaged: ['diff', '--stat'], staged: ['diff', '--staged', '--stat'], recent_commits: ['log', '-5', '--oneline'] };
+    const results = await Promise.all(Object.entries(commands).map(async ([key, command]) => [key, await runGit([...command, ...suffix], scope.cwd)]));
+    return jsonResult(Object.fromEntries(results.map(([key, result]) => [key, { output: result.out.trim().slice(0, 24000), error: result.err.trim().slice(0, 4000), ok: result.ok }])));
+  }
+  if (name === 'service_inspect') {
+    const record = await manageProcess({ action: 'status', name: args.name });
+    if (!record.found) return jsonResult(record);
+    const max = Math.min(Math.max(Number(args.max_bytes) || 8000, 1), 32000);
+    const logs = {};
+    for (const [key, path] of [['stdout', record.stdout_log], ['stderr', record.stderr_log]]) {
+      const file = await open(assertInsideWorkspace(path), 'r').catch(() => null);
+      if (!file) { logs[key] = { available: false }; continue; }
+      try {
+        const info = await file.stat();
+        const buffer = Buffer.alloc(Math.min(max, info.size));
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, Math.max(0, info.size - max));
+        logs[key] = { text: buffer.subarray(0, bytesRead).toString('utf8'), truncated: info.size > max };
+      } finally { await file.close(); }
+    }
+    let readiness;
+    if (args.ready_url) {
+      const url = new URL(args.ready_url);
+      if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Readiness probes must use a localhost HTTP(S) URL.');
+      readiness = await waitForHttpReady(url.href, Math.min(Math.max(Number(args.timeout_ms) || 3000, 100), 10000));
+    }
+    return jsonResult({ ...record, logs, ...(readiness ? { readiness, readiness_note: 'Endpoint response does not prove which process owns the port.' } : {}) });
+  }
+  if (name === 'session_diagnostics') {
+    const session = activeSession(opts);
+    const contextLimit = opts.contextLimit || contextLimitFor(opts.provider, opts.model);
+    const contextTokens = estimateContextTokens(session.messages || []);
+    const agents = opts.coordDir ? await listAgents(opts.coordDir, { includeStopped: true }) : [];
+    const inbox = opts.coordDir && opts.agentId ? await readAgentInbox(opts.coordDir, opts.agentId, { max: 100 }) : [];
+    const customEndpoint = opts.baseUrl && opts.baseUrl.replace(/\/+$/, '') !== providerConfig(opts.provider).baseUrl.replace(/\/+$/, '');
+    return jsonResult({
+      provider: opts.provider, model: opts.model, context_tokens_estimate: contextTokens, context_limit: contextLimit, context_percent_estimate: Math.round(contextTokens / contextLimit * 100),
+      usage: usageTotals(session, customEndpoint ? () => null : modelPrice), cost_note: 'Token estimate only; provider billing, tool charges, and other request modes can differ.', budget: opts.providerBudget || unavailableBudget(opts.provider),
+      agents: agents.map(agent => ({ agentId: agent.agentId, role: agent.role, state: agent.state, live: agent.live, heartbeatAt: agent.heartbeatAt, pid: agent.pid })),
+      inbox_pending_in_page: Array.isArray(inbox) ? inbox.length : inbox.messages?.length || 0, inbox_page_limit: 100,
+      recent_tool_errors: (session.messages || []).filter(message => message.role === 'tool' && (message.is_error || /^(?:(?:tool\s+)?error|failed|blocked)\b/i.test(String(message.content || '')))).slice(-5).map(message => ({ tool_call_id: message.tool_call_id, error: String(message.content).slice(0, 500) })),
+      loaded_toolpacks: session.config?.toolpacks || []
+    });
+  }
   if (opts.mcpManager?.isManagement(name)) return opts.mcpManager.manage(name, args);
   if (opts.mcpManager?.has(name)) return opts.mcpManager.call(name, args);
   const capabilities = modelCapabilities(opts.provider, opts.model);
   if (name === 'view_image' && !capabilities.vision) {
     throw new Error(`Model '${opts.model}' cannot receive native image content. Use analyze_image_openai so an OpenAI vision model can inspect the image.`);
+  }
+  if (name === 'analyze_image_openai' && capabilities.vision) {
+    throw new Error(`Model '${opts.model}' supports native image input. Use view_image to inspect the image directly without an OpenAI fallback request.`);
   }
   if (name === 'generate_image' && !capabilities.imageGeneration) {
     throw new Error(`Model '${opts.model}' cannot use native image generation. Use generate_image_openai.`);
@@ -5129,6 +5283,25 @@ function mergeToolDelta(toolCalls, deltas) {
   }
 }
 
+function providerMessagesWithoutNameChat(messages) {
+  const nameChatCallIds = new Set();
+  for (const message of messages || []) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.tool_calls || []) {
+      if (call.function?.name === "name_chat" && call.id) nameChatCallIds.add(call.id);
+    }
+  }
+  if (!nameChatCallIds.size) return messages;
+  return messages.filter((message) => {
+    if (message.role === "tool" && nameChatCallIds.has(message.tool_call_id)) return false;
+    if (message.role !== "assistant") return true;
+    // name_chat is harness metadata rather than part of the model's task
+    // history. In particular, DeepSeek V4 cannot replay a thinking-disabled
+    // tool call as the preceding turn of a thinking-enabled request.
+    return !(message.tool_calls || []).some((call) => call.function?.name === "name_chat");
+  });
+}
+
 async function executeToolCall(opts, call) {
   const name = call.function?.name || "(unknown)";
   const rawArgs = call.function?.arguments || "{}";
@@ -5147,7 +5320,7 @@ async function executeToolCall(opts, call) {
 
 function shouldRunToolsSequentially(opts, calls) {
   if (opts.toolMode === "sequential") return true;
-  if (calls.some((call) => ["mcp_server_add", "mcp_server_remove"].includes(call.function?.name))) return true;
+  if (calls.some((call) => ["mcp_server_add", "mcp_server_remove", "load_toolpack", "slack"].includes(call.function?.name))) return true;
   if (calls.some((call) => call.function?.name === "agent_wait")) return true;
   if (opts.dangerouslyAutoRunCommands) return false;
   return calls.some((call) => ["run_cmd", "run_bash", "run_powershell", "functions_shell_command", "functions.shell_command"].includes(call.function?.name));
@@ -5266,7 +5439,7 @@ function reportTokenUsage(opts, usage) {
   }
 }
 
-async function streamChat(opts, messages, toolsEnabled = opts.tools) {
+async function streamChat(opts, messages, toolsEnabled = opts.tools, forcedToolName = "") {
   let apiKey = await getProviderApiKey(opts.provider);
   let provider = providerConfig(opts.provider);
   if (!apiKey) throw new Error(`No ${provider.label} API key found. Run: switchyard config set-${opts.provider === "deepseek" ? "" : `${opts.provider}-`}key <key>`);
@@ -5292,14 +5465,19 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
     let phase = "";
     let status = createStatusLine(opts, randomStatusPhrase());
     const reasoningWriter = opts.ui ? opts.ui.writer("reasoning") : createMarkdownWriter(opts, (text) => dim(opts, text), { status });
-    const contentWriter = opts.ui ? opts.ui.writer("assistant") : createMarkdownWriter(opts, (text) => applyKnownFileLinks(opts, text, opts.touchedFiles || []), { status });
+    const contentWriter = opts.ui
+      ? opts.ui.writer("assistant")
+      : opts.uiStream
+        ? { write: text => process.stdout.write(String(text ?? "")), flush() {} }
+        : createMarkdownWriter(opts, (text) => applyKnownFileLinks(opts, text, opts.touchedFiles || []), { status });
     const ensureToolStatus = () => {
       if (status.isActive()) return status;
       status = createStatusLine(opts, "Preparing tools");
       return status;
     };
     try {
-      for await (const data of providerStream(opts, messages, {
+      const requestOpts = forcedToolName ? { ...opts, toolChoice: forcedToolName } : opts;
+      for await (const data of providerStream(requestOpts, providerMessagesWithoutNameChat(messages), {
         apiKey, tools: toolsEnabled ? toolSchemas(opts) : [], signal: controller.signal
       })) {
         if (data.usage) usage = data.usage;
@@ -5315,7 +5493,7 @@ async function streamChat(opts, messages, toolsEnabled = opts.tools) {
             phase = "thinking";
           }
           reasoningContent += delta.reasoning_content;
-          if (!opts.noOutput && opts.thinking !== 'disabled') reasoningWriter.write(delta.reasoning_content);
+          if (!opts.uiStream && !opts.noOutput && opts.thinking !== 'disabled') reasoningWriter.write(delta.reasoning_content);
         }
 
         if (delta.content) {
@@ -5426,6 +5604,7 @@ async function ensureContextCompact(opts, session) {
         if (opts.noOutput) return;
         const budget = plan.messagesBudget || plan.limit;
         const pct = Math.round(((plan.usageScaled || plan.usage) / budget) * 100);
+        if (plan.reducedKeepRecent) heading(opts, `reducing retained history from ${plan.requestedKeepRecent} to ${plan.keepRecent} turns to fit the context window`, "warn");
         heading(opts, `context ~${pct}% of ${formatCompactCount(budget)} — compacting (${opts.compactMethod === "truncate" ? "deterministic roll-up" : "summarizing old messages"})…`, "warn");
       }
     });
@@ -5559,6 +5738,7 @@ async function spawnSwarmAgent(opts, args, { resume }) {
     throw new Error("spawn_agent / resume_agent are coordinator-only. Workers may not spawn agents; message the coordinator to scale the swarm.");
   }
   const agentId = validateAgentId(args.agent_id);
+  const requestedDisplayName = String(args.display_name || "").replace(/\s+/g, " ").trim().slice(0, 80);
   const prompt = String(args.prompt || "").trim();
   if (!prompt) throw new Error("prompt is required.");
 
@@ -5571,6 +5751,8 @@ async function spawnSwarmAgent(opts, args, { resume }) {
   } else if (existing) {
     throw new Error(`Agent '${agentId}' already exists (state ${existing.state}) — use resume_agent '${agentId}' to resume it instead.`);
   }
+  if (!resume && !requestedDisplayName) throw new Error("display_name is required when spawning a new agent.");
+  const displayName = requestedDisplayName || existing?.displayName || agentId;
 
   const role = String(args.role || "worker").toLowerCase();
   if (!["coordinator", "worker"].includes(role)) throw new Error("role must be coordinator or worker.");
@@ -5592,16 +5774,19 @@ async function spawnSwarmAgent(opts, args, { resume }) {
   // direct node.exe spawn always runs. `detached: true` + `unref()` makes the
   // child fully independent of this agent — the coordinator keeps working.
   const nodeExe = process.execPath;
-  const script = fileURLToPath(new URL("./deepseek-watch.js", import.meta.url));
   const workerArgs = [
-    script,
     "--agent-id", agentId,
+    "--agent-name", displayName,
     "--agent-role", role,
     "--coordinator-id", opts.agentId,
     ...(mission ? ["--agent-mission", mission] : []),
     "--provider", provider,
     "--model", model,
     "--coord-dir", coordDir,
+    ...(resume && existing?.session ? ["--resume", "--session", existing.session] : []),
+    ...(provider === opts.provider && opts.baseUrl ? ["--base-url", opts.baseUrl] : []),
+    "--max-tokens", String(opts.maxTokens || 16384),
+    ...(opts.maxToolTurns != null ? ["--max-tool-turns", String(opts.maxToolTurns)] : []),
     "--permission", permission,
     "--compact-keep-recent", String(opts.compactKeepRecent || 15),
     ...(opts.compactProvider ? ["--compact-provider", opts.compactProvider] : []),
@@ -5616,7 +5801,7 @@ async function spawnSwarmAgent(opts, args, { resume }) {
     "--compact-limit", String(contextLimitFor(provider, model)),
     "-p", prompt
   ];
-  const child = spawn(nodeExe, workerArgs, { detached: true, stdio: "ignore", windowsHide: true });
+  const child = spawn(nodeExe, selfLaunchArgs(workerArgs), { cwd: resume ? existing.workspace || process.cwd() : process.cwd(), detached: true, stdio: "ignore", windowsHide: true });
   child.unref();
 
   // The spawn PID is not proof the worker started: verify by polling the
@@ -5628,7 +5813,7 @@ async function spawnSwarmAgent(opts, args, { resume }) {
     try {
       const record = JSON.parse(await readFile(join(coordDir, "agents", `${agentId}.json`), "utf8"));
       const heartbeat = Date.parse(record.heartbeatAt || "");
-      if (Number.isFinite(heartbeat) && Date.now() - heartbeat < 20000) {
+      if (record.pid === child.pid && Number.isFinite(heartbeat) && Date.now() - heartbeat < 20000) {
         registered = { pid: record.pid, state: record.state, instanceId: record.instanceId, session: record.session || null };
         break;
       }
@@ -5674,6 +5859,7 @@ async function resumeAgentAfterMessage(opts, agentId) {
     "--resume",
     "--session", existing.session,
     "--agent-id", agentId,
+    "--agent-name", String(existing.displayName || agentId).replace(/\s+/g, " ").trim().slice(0, 80),
     "--agent-role", existing.role || config.agentRole || "worker",
     "--coord-dir", existing.coordinationRoot || opts.coordDir,
     "--permission", config.permission || "full",
@@ -5694,6 +5880,8 @@ async function resumeAgentAfterMessage(opts, agentId) {
 }
 
 async function processAgentTurns(opts, session) {
+  const namingContinues = await nameSessionIfNeeded(opts, session);
+  if (!namingContinues) return;
   let emptyRecoveryAttempts = 0;
   for (let turn = 0; opts.maxToolTurns === null || turn <= opts.maxToolTurns; turn += 1) {
     const priorBudget = opts.providerBudget?.checkedAt;
@@ -6264,6 +6452,100 @@ async function handleApiSlash(opts, session, text) {
   return true;
 }
 
+function launchInstalledDesktopApp() {
+  const localAppData = process.env.LOCALAPPDATA || join(userInfo().homedir, "AppData", "Local");
+  const desktopApp = join(localAppData, "Programs", "Switchyard", "Switchyard.exe");
+  if (!existsSync(desktopApp)) {
+    throw new Error("Switchyard Desktop is not installed. Run `switchyard -ui` from the source checkout instead.");
+  }
+  const child = spawn(desktopApp, [], { detached: true, stdio: "ignore", windowsHide: false });
+  child.unref();
+  process.stdout.write("Opened Switchyard Desktop.\n");
+}
+
+function fallbackChatTitle(prompt) {
+  return fallbackSessionTitle(prompt);
+}
+
+async function nameSessionIfNeeded(opts, session) {
+  if (!session.config?.chatNamingPending) return true;
+  const prompt = session.messages.find((message) => message.role === "user")?.content || "";
+  const fallback = fallbackChatTitle(prompt) || "New chat";
+  const save = async () => {
+    if (opts.saveSession) await writeSession(opts.session, touchSession(session));
+  };
+  const useFallback = async (reason = "") => {
+    if (!session.title) {
+      session.title = fallback;
+      session.titleSource = "prompt";
+      session.titleSetAt = new Date().toISOString();
+    }
+    session.config.chatNamingPending = false;
+    await save();
+    const message = reason
+      ? `Model chat naming unavailable (${reason}); using prompt title: ${session.title}`
+      : `Chat named: ${session.title}`;
+    if (opts.ui) opts.ui.add("notice", message);
+    else if (!opts.noOutput) process.stderr.write(`${message}\n`);
+  };
+
+  if (!opts.tools || !prompt) {
+    await useFallback(!opts.tools ? "tool calling is disabled" : "no user prompt was provided");
+    return true;
+  }
+
+  let assistant;
+  try {
+    const namingOpts = { ...opts, noOutput: true, ui: null, nameChatPending: true };
+    // DeepSeek V4 rejects a forced tool choice while thinking mode is enabled.
+    // Keep this short metadata call non-thinking; the actual conversation turn
+    // immediately returns to the user's selected reasoning mode.
+    if (normalizeProvider(opts.provider) === "deepseek" && namingOpts.thinking === "enabled") {
+      namingOpts.thinking = "disabled";
+    }
+    // Keep the first-turn rule in the actual system message sent to the model,
+    // not only in the function list. The regular session prompt is restored
+    // automatically because this is a request-local copy.
+    const namingMessages = session.messages.map((message, index) => index === 0 && message.role === "system"
+      ? {
+          ...message,
+          content: `${message.content}\n\nFIRST-TURN CHAT NAMING: Before responding or doing any work, call name_chat exactly once with a concise title based on the user's first request. name_chat is the only usable tool in this turn. All other tools are unavailable until the chat has been named. Do not call or attempt to use any other tool.`
+        }
+      : message);
+    assistant = await streamChat(namingOpts, namingMessages, true, "name_chat");
+  } catch {
+    await useFallback("the provider request failed");
+    return true;
+  }
+  if (assistant.interrupted) {
+    session.messages.push(assistant);
+    const repaired = repairToolCallHistory(session.messages);
+    session.messages = repaired.messages;
+    await save();
+    return false;
+  }
+
+  const calls = assistant.tool_calls || [];
+  const nameCall = calls.find((call) => call.function?.name === "name_chat");
+  if (nameCall) {
+    // Keep only the naming call from this first response. Even if a provider
+    // returns sibling tool calls despite the forced choice, none may run until
+    // the chat has a stable title.
+    session.messages.push({ ...assistant, tool_calls: [nameCall] });
+    const execution = await executeToolCall(opts, nameCall);
+    session.messages.push({ role: "tool", tool_call_id: nameCall.id, content: execution.result });
+    if (!session.title) await useFallback();
+    else await save();
+    if (opts.ui && session.titleSource === "model") opts.ui.add("notice", `Chat named: ${session.title}`);
+    return true;
+  }
+
+  // A provider may ignore forced tool choice. Discard its response so no
+  // unrelated tool can run before naming, then use the deterministic title.
+  await useFallback(calls.length ? "the first tool-call array omitted name_chat" : "the model returned no name_chat tool call");
+  return true;
+}
+
 async function runMcpCommand(args) {
   const [command, name] = args;
   if (!command || command === "help") { process.stdout.write("Usage: switchyard mcp list | add | remove <name> | test <name>\nSecrets should be referenced as ${env:VARIABLE}, never pasted into config.\n"); return; }
@@ -6290,12 +6572,49 @@ async function run() {
     await nativeAuth(argv[1], argv[0] === "login" ? "login" : "status");
     return;
   }
+  if (argv[0] === "app") {
+    launchInstalledDesktopApp();
+    return;
+  }
   if (argv[0] === "-ui" || argv[0] === "--ui" || argv[0] === "ui") {
     launchElectronUi(argv.slice(1));
     return;
   }
   if (argv[0] === "doctor") {
     process.stdout.write(`${await doctor()}\n`);
+    return;
+  }
+  if (argv[0] === "migrate") {
+    let copy = false;
+    let dataRoot = switchyardDataRoot();
+    const watchRoots = [];
+    for (let i = 1; i < argv.length; i += 1) {
+      const arg = argv[i];
+      if (arg === "--copy") copy = true;
+      else if (arg === "--dry-run") copy = false;
+      else if (arg === "--dest") {
+        const value = argv[++i];
+        if (!value) throw new Error("--dest requires a directory path.");
+        dataRoot = resolve(value);
+      } else if (arg === "--watch-root") {
+        const value = argv[++i];
+        if (!value) throw new Error("--watch-root requires a .deepseek-watch directory path.");
+        watchRoots.push(resolve(value));
+      }
+      else if (arg === "--help" || arg === "-h") {
+        process.stdout.write("Usage: switchyard migrate [--dry-run|--copy] [--dest <dir>] [--watch-root <.deepseek-watch dir>]\n\nBy default, scans every mounted drive and prints a dry run. --copy stages sessions and coordination data under ~/.switchyard without deleting source files. If --dest is used, set SWITCHYARD_DATA_DIR to the same path for normal Switchyard use.\n");
+        return;
+      } else throw new Error(`Unknown migration option: ${arg}`);
+    }
+    const report = await migrateLegacyData({
+      copy,
+      dataRoot,
+      watchRoots: watchRoots.length ? watchRoots : undefined,
+      onProgress: ({ visited, rootsFound }) => process.stderr.write(`\rScanned ${visited} directories · found ${rootsFound} legacy roots…`)
+    });
+    if (report.directoriesVisited) process.stderr.write("\n");
+    process.stdout.write(`${formatMigrationReport(report, { copied: copy })}\n`);
+    if (report.conflicts.length || report.copyErrors.length) process.exitCode = 1;
     return;
   }
   if (argv[0] === "update") {
@@ -6484,6 +6803,8 @@ async function run() {
   }
 
   opts.agentRole = String(opts.agentRole || resumedSession?.config?.agentRole || "worker").trim().toLowerCase() || "worker";
+  if (opts.agentRole === "coordinator" && resumedSession?.config?.agentRole !== "coordinator" && !opts.coordinatorIdExplicit) opts.coordinatorId = null;
+  opts.agentName = String(opts.agentName || resumedSession?.config?.agentName || "").replace(/\s+/g, " ").trim() || null;
   opts.permission = opts.permission || resumedSession?.config?.permission || (opts.dangerouslyAutoRunCommands ? "full" : "ask");
   if (["full", "yolo"].includes(opts.permission)) opts.dangerouslyAutoRunCommands = true;
   workspacePathPolicy = { permission: opts.permission, agentRole: opts.agentRole };
@@ -6536,7 +6857,8 @@ async function run() {
         toolMode: opts.toolMode,
         skills: opts.skills,
         skillRoots: opts.skillRoots,
-        coordinatorId: opts.coordinatorId
+        coordinatorId: opts.coordinatorId,
+        chatNamingPending: Boolean(opts.tools && (userPrompt || opts.interactiveChat))
       }
     });
 
@@ -6553,6 +6875,8 @@ async function run() {
   }
 
   opts.permission = opts.permission || session.config?.permission || (opts.dangerouslyAutoRunCommands ? "full" : "ask");
+  opts.agentName ||= session.config?.agentName || null;
+  opts.coordinatorId ||= session.config?.coordinatorId || null;
   workspacePathPolicy = { permission: opts.permission, agentRole: opts.agentRole };
   opts.toolMode = opts.toolMode || session.config?.toolMode || "parallel";
   if (["full", "yolo"].includes(opts.permission)) opts.dangerouslyAutoRunCommands = true;
@@ -6571,11 +6895,20 @@ async function run() {
     skills: opts.skills,
     skillRoots: opts.skillRoots,
     agentId: opts.agentId,
+    agentName: opts.agentName,
     agentRole: opts.agentRole,
     agentMission: opts.agentMission,
     coordDir: opts.coordDir,
     coordinatorId: opts.coordinatorId
   };
+  if (!session.title && !session.config.chatNamingPending) {
+    const priorPrompt = session.messages.find((message) => message.role === "user")?.content || "";
+    if (priorPrompt) {
+      session.title = fallbackChatTitle(priorPrompt) || "New chat";
+      session.titleSource = "prompt";
+      session.titleSetAt ||= session.createdAt || new Date().toISOString();
+    }
+  }
   if (session.provider !== opts.provider || session.model !== opts.model) {
     for (const message of session.messages) delete message.providerState;
   }
@@ -6585,6 +6918,8 @@ async function run() {
   opts.sessionObject = session;
   opts.agentRuntime = await createAgentRuntime(opts.coordDir, {
     agentId: opts.agentId,
+    displayName: opts.agentName,
+    coordinatorId: opts.coordinatorId,
     role: opts.agentRole,
     mission: opts.agentMission,
     workspace: process.cwd(),

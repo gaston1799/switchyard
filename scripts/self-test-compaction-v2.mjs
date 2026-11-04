@@ -63,8 +63,17 @@ test("successive compactions replace the earlier summary instead of accumulating
 test("oversized retained turns produce an explicit error without mutation", async () => {
   const session = { messages: messages() };
   const before = structuredClone(session);
-  await assert.rejects(compactSession({ ...options, contextLimit: 5000 }, session), /cannot fit while preserving 15/);
+  await assert.rejects(compactSession({ ...options, contextLimit: 5000, compactKeepRecentExplicit: true }, session), /cannot fit while preserving 15/);
   assert.deepEqual(session, before);
+});
+
+test("default retained-turn target shrinks until an oversized transcript fits", () => {
+  const input = [{ role: "system", content: "instructions" }];
+  for (let i = 0; i < 6; i++) input.push({ role: "assistant", content: `turn ${i}:` + "x".repeat(10000) });
+  const plan = computeCompactionPlan(input, { limit: 18000, completionTokens: 4096, force: true, allowKeepRecentReduction: true });
+  assert.ok(plan.reducedKeepRecent);
+  assert.ok(plan.keepRecent < plan.requestedKeepRecent);
+  assert.ok(plan.summaryBudget >= 128);
 });
 
 test("tool schema budget is included in trigger and post-compaction budget", async () => {

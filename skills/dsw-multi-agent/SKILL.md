@@ -37,7 +37,7 @@ Do not edit a scope claimed by another agent unless it explicitly hands the task
 
 Workers are FORBIDDEN from spawning agents — the tools reject them. Only `--agent-role coordinator` may grow the swarm:
 
-- `spawn_agent {agent_id, prompt, role?, mission?, model?, permission?}` — spawns a NEW agent as a **detached headless background process** (non-blocking: the coordinator keeps working). The caller's working directory and the shared `--coord-dir` are pulled automatically. **Fails if `agent_id` already exists** and tells you to use `resume_agent` instead.
+- `spawn_agent {agent_id, display_name, prompt, role?, mission?, model?, permission?}` — spawns a NEW agent as a **detached headless background process** (non-blocking: the coordinator keeps working). Always choose a concise, descriptive `display_name` for the dashboard; use `agent_id` as the stable routing identity. The caller's working directory and shared `--coord-dir` are pulled automatically. **Fails if `agent_id` already exists** and tells you to use `resume_agent` instead.
 - `resume_agent {agent_id, prompt, ...}` — spawns an EXISTING id as a detached background process, resuming its saved session (state, mission, claims). **Fails if the id has no coordination record** (use `spawn_agent`) or is **currently live**.
 
 Spawned workers run headless (no window — console windows can't be created reliably from the wrapper context; that is why a node-spawned `powershell.exe`/`cmd /c start` window opens but never executes). The tool verifies registration by polling the agent's coordination record (fresh heartbeat) and reports the registered PID. For **tiled, visible windows**, use `launch.ps1` from a terminal instead — it spawns via `Start-Process` which does create real windows.

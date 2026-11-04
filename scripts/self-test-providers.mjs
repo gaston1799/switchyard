@@ -60,6 +60,14 @@ test("provider aliases and wire formats preserve call/result pairing without lea
       assert.equal(body.messages.at(-1).tool_call_id, "call_1");
       assert.equal(body.stream_options.include_usage, true);
     }
+
+    const named = JSON.parse(buildProviderRequest({ ...opts, toolChoice: "name_chat" }, history, {
+      tools: [{ type: "function", function: { name: "name_chat", description: "Name this chat", parameters: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } } }],
+      apiKey: "test", stream: true
+    }).init.body);
+    if (provider === "anthropic") assert.deepEqual(named.tool_choice, { type: "tool", name: "name_chat" });
+    else if (provider === "openai") assert.deepEqual(named.tool_choice, { type: "function", name: "name_chat" });
+    else assert.deepEqual(named.tool_choice, { type: "function", function: { name: "name_chat" } });
   }
 });
 
@@ -67,7 +75,7 @@ test('model capabilities gate native vision and image generation conservatively'
   assert.deepEqual(modelCapabilities('openai', 'gpt-5'), { vision: true, imageGeneration: true });
   assert.deepEqual(modelCapabilities('openai', 'gpt-5.1-codex'), { vision: true, imageGeneration: false });
   assert.deepEqual(modelCapabilities('anthropic', 'claude-sonnet-4-6'), { vision: true, imageGeneration: false });
-  assert.deepEqual(modelCapabilities('deepseek', 'deepseek-v4-flash'), { vision: false, imageGeneration: false });
+  assert.deepEqual(modelCapabilities('deepseek', 'deepseek-v4-flash'), { vision: true, imageGeneration: false });
   assert.equal(modelCapabilities('deepseek', 'deepseek-v4-flash-vision-exp').vision, true);
   assert.equal(modelCapabilities('glm', 'glm-4.6v').vision, true);
   assert.equal(modelCapabilities('openai', 'gpt-5-search-api').vision, false);
@@ -87,7 +95,7 @@ test('multimodal tool results become native Claude and GPT image content', () =>
   assert.equal(gpt.input.at(-1).content[1].type, 'input_image');
   assert.equal(gpt.input.at(-1).content[1].image_url, 'data:image/png;base64,aGVsbG8=');
 
-  const textOnly = JSON.parse(buildProviderRequest(optsFor('deepseek'), multimodalHistory, { apiKey: 'test' }).init.body);
+  const textOnly = JSON.parse(buildProviderRequest({ ...optsFor('deepseek'), model: 'deepseek-v4-pro' }, multimodalHistory, { apiKey: 'test' }).init.body);
   assert.equal(textOnly.messages.at(-1).role, 'tool');
   assert.equal(textOnly.messages.some(message => Array.isArray(message.content)), false);
 });
@@ -222,10 +230,15 @@ test('GPT API session executes view_image as real image input and releases persi
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw); requests.push(body);
     const hasImage = body.input.some(item => Array.isArray(item.content) && item.content.some(part => part.type === 'input_image'));
-    const output = hasImage
+    const naming = body.tool_choice?.name === 'name_chat';
+    const output = naming
+      ? [{ type: 'function_call', id: 'fc_name', call_id: 'call_name', name: 'name_chat', arguments: '{"title":"Pixel image review"}' }]
+      : hasImage
       ? [{ type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'output_text', text: 'image received', annotations: [] }] }]
       : [{ type: 'function_call', id: 'fc_1', call_id: 'call_image', name: 'view_image', arguments: '{"path":"pixel.png"}' }];
-    const events = hasImage
+    const events = naming
+      ? [{ type: 'response.output_item.added', output_index: 0, item: { ...output[0], arguments: '' } }, { type: 'response.function_call_arguments.delta', output_index: 0, delta: output[0].arguments }, { type: 'response.completed', response: { output, usage: { input_tokens: 20, output_tokens: 5 } } }]
+      : hasImage
       ? [{ type: 'response.output_text.delta', delta: 'image received' }, { type: 'response.completed', response: { output, usage: { input_tokens: 20, output_tokens: 5 } } }]
       : [{ type: 'response.output_item.added', output_index: 0, item: { ...output[0], arguments: '' } }, { type: 'response.function_call_arguments.delta', output_index: 0, delta: output[0].arguments }, { type: 'response.completed', response: { output, usage: { input_tokens: 20, output_tokens: 5 } } }];
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(sse(events));
@@ -235,14 +248,57 @@ test('GPT API session executes view_image as real image input and releases persi
   try {
     const result = await runCli('deepseek-watch.js', ['--provider', 'openai', '--model', 'gpt-5', '--base-url', `http://127.0.0.1:${server.address().port}/v1`, '--session', sessionPath, '--permission', 'review', '--no-update-check', '--tui-quiet', '--retry-attempts', '1', '-p', 'inspect pixel.png'], dir, { OPENAI_API_KEY: 'test' });
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(requests.length, 2);
-    const image = requests[1].input.flatMap(item => Array.isArray(item.content) ? item.content : []).find(part => part.type === 'input_image');
+    assert.equal(requests.length, 3);
+    assert.equal(requests[0].tool_choice.name, 'name_chat');
+    assert.equal(requests[0].tools.length, 1);
+    const image = requests.find(request => request.input.some(item => Array.isArray(item.content) && item.content.some(part => part.type === 'input_image'))).input.flatMap(item => Array.isArray(item.content) ? item.content : []).find(part => part.type === 'input_image');
     assert.equal(image.image_url, `data:image/png;base64,${png}`);
     const session = JSON.parse(await readFile(sessionPath, 'utf8'));
-    const media = session.messages.find(message => message.role === 'tool').content;
+    const media = session.messages.find(message => message.tool_call_id === 'call_image').content;
     assert.equal(media.consumed, true);
     assert.equal(media.images[0].data, undefined);
     assert.equal(session.messages.at(-1).content, 'image received');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('DeepSeek Flash sees view_image, hides OpenAI analysis, and receives actual image bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'switchyard-deepseek-vision-'));
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEAQH/69kZ7wAAAABJRU5ErkJggg==';
+  await writeFile(join(dir, 'pixel.png'), Buffer.from(png, 'base64'));
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    if (req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"data":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"}]}'); return; }
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw); requests.push(body);
+    const naming = body.tool_choice?.function?.name === 'name_chat';
+    const hasImage = body.messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'));
+    const tool = naming ? 'name_chat' : !hasImage && body.model === 'deepseek-flash' ? 'view_image' : null;
+    const events = tool ? [
+      { choices: [{ delta: { reasoning_content: 'Fixture reasoning', tool_calls: [{ index: 0, id: `call_${tool}`, type: 'function', function: { name: tool, arguments: JSON.stringify(tool === 'name_chat' ? { title: 'Image test' } : { path: 'pixel.png' }) } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }
+    ] : [
+      { choices: [{ delta: { content: hasImage ? 'image received directly' : 'text-only fallback available' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }
+    ];
+    res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(sse(events) + 'data: [DONE]\n\n');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const model of ['deepseek-flash', 'deepseek-v4-pro']) {
+      const result = await runCli('deepseek-watch.js', ['--provider', 'deepseek', '--model', model, '--base-url', `http://127.0.0.1:${server.address().port}`, '--session', join(dir, `${model}.json`), '--permission', 'review', '--no-update-check', '--tui-quiet', '--retry-attempts', '1', '-p', 'Inspect pixel.png'], dir, { DEEPSEEK_API_KEY: 'test', OPENAI_API_KEY: 'test' });
+      assert.equal(result.code, 0, result.stderr);
+      const normal = requests.find(request => request.model === model && request.tool_choice?.function?.name !== 'name_chat');
+      const tools = normal.tools.map(tool => tool.function.name);
+      assert.equal(tools.includes('view_image'), model === 'deepseek-flash');
+      assert.equal(tools.includes('analyze_image_openai'), model === 'deepseek-v4-pro');
+    }
+    const imageRequest = requests.find(request => request.messages.some(message => Array.isArray(message.content)));
+    const image = imageRequest.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).find(part => part.type === 'image_url');
+    assert.equal(image.image_url.url, `data:image/png;base64,${png}`);
+    assert.equal(imageRequest.model, 'deepseek-flash');
   } finally {
     await new Promise(resolve => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
@@ -259,16 +315,27 @@ test("watch CLI executes a real local tool round and resumes saved Claude/GPT se
       let raw = ""; for await (const chunk of req) raw += chunk;
       const body = JSON.parse(raw); requests.push({ url: req.url, body });
       const anthropic = req.url.endsWith("/messages");
-      const hasResult = anthropic ? body.messages.some((m) => m.content.some((c) => c.type === "tool_result")) : body.input.some((i) => i.type === "function_call_output");
-      const useTool = body.stream && !hasResult;
-      const output = anthropic ? [{ type: "text", text: "fixture complete" }] : [{ type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "fixture complete", annotations: [] }] }];
+      const historyItems = anthropic ? body.messages.flatMap((message) => Array.isArray(message.content) ? message.content : []) : body.input;
+      const priorCalls = historyItems.filter((item) => item.type === "tool_use" || item.type === "function_call");
+      const readCall = priorCalls.find((item) => item.name === "read_text_file");
+      const forcedName = body.tool_choice?.name === "name_chat" || body.tool_choice?.function?.name === "name_chat";
+      const useName = Boolean(body.stream && forcedName);
+      const useTool = Boolean(body.stream && !useName && !readCall);
+      const output = useName
+        ? (anthropic ? [{ type: "tool_use", id: "call_name", name: "name_chat", input: { title: "Named fixture" } }] : [{ type: "function_call", id: "fc_name", call_id: "call_name", name: "name_chat", arguments: '{"title":"Named fixture"}' }])
+        : useTool
+          ? (anthropic ? [{ type: "tool_use", id: "call_1", name: "read_text_file", input: { path: "note.txt" } }] : [{ type: "function_call", id: "fc_1", call_id: "call_1", name: "read_text_file", arguments: '{"path":"note.txt"}' }])
+          : (anthropic ? [{ type: "text", text: "fixture complete" }] : [{ type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "fixture complete", annotations: [] }] }]);
       if (!body.stream) { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(anthropic ? { content: output } : { status: "completed", output })); return; }
       let events;
       if (anthropic) {
-        const block = useTool ? { type: "tool_use", id: "call_1", name: "read_text_file", input: { path: "note.txt" } } : output[0];
-        events = [{ type: "message_start", message: { usage: { input_tokens: 20 } } }, { type: "content_block_start", index: 0, content_block: block }, { type: "content_block_stop", index: 0 }, { type: "message_delta", delta: { stop_reason: useTool ? "tool_use" : "end_turn" }, usage: { output_tokens: 20 } }, { type: "message_stop" }];
+        const block = output[0];
+        events = [{ type: "message_start", message: { usage: { input_tokens: 20 } } }, { type: "content_block_start", index: 0, content_block: block }, { type: "content_block_stop", index: 0 }, { type: "message_delta", delta: { stop_reason: (useTool || useName) ? "tool_use" : "end_turn" }, usage: { output_tokens: 20 } }, { type: "message_stop" }];
       } else if (useTool) {
-        const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_text_file", arguments: '{"path":"note.txt"}' };
+        const item = output[0];
+        events = [{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } }, { type: "response.function_call_arguments.delta", output_index: 0, delta: item.arguments }, { type: "response.completed", response: { output: [item], usage: { input_tokens: 20, output_tokens: 20 } } }];
+      } else if (useName) {
+        const item = output[0];
         events = [{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } }, { type: "response.function_call_arguments.delta", output_index: 0, delta: item.arguments }, { type: "response.completed", response: { output: [item], usage: { input_tokens: 20, output_tokens: 20 } } }];
       } else events = [{ type: "response.output_text.delta", delta: "fixture complete" }, { type: "response.completed", response: { output, usage: { input_tokens: 20, output_tokens: 20 } } }];
       res.writeHead(200, { "content-type": "text/event-stream" }); res.end(sse(events));
@@ -355,7 +422,7 @@ test("the other providers' windows are unchanged by the OpenAI rules", () => {
 test("a model nobody has added still degrades to the cautious floor, with a warning flag", () => {
   // The fallback must stay -- a newly released name should compact early rather
   // than assume a window it may not have.
-  for (const model of ["gpt-6-astra", "zzz-unreleased-model", "totally-new-model"]) {
+  for (const model of ["gpt-99-unreleased", "zzz-unreleased-model", "totally-new-model"]) {
     assert.equal(contextLimitFor("openai", model), UNKNOWN_MODEL_CONTEXT_LIMIT, model);
     assert.equal(hasKnownContextLimit(model), false, model);
   }
@@ -369,7 +436,7 @@ test("a model nobody has added still degrades to the cautious floor, with a warn
  * somebody can actually select, so a missing window means real compaction at
  * 131K on a model that may hold far more.
  */
-test("every priced model has a known context window, except the one documented omission", () => {
+test("every priced model has a known context window, except documented unknown windows", () => {
   const lines = readFileSync(new URL("../src/model-pricing.js", import.meta.url), "utf8").split(String.fromCharCode(10));
   let provider = null;
   const priced = [];
@@ -382,15 +449,13 @@ test("every priced model has a known context window, except the one documented o
   }
   assert.ok(priced.length >= 50, `parsed only ${priced.length} priced models -- the parse broke, not the table`);
   const unknown = priced.filter((id) => !hasKnownContextLimit(id));
-  // GPT-6 windows have not been published. Embeddings/moderation and legacy
-  // completion-only IDs are not chat context windows; GLM flashX's window is
-  // also not published. Keep these explicit so they continue to warn/fail safe.
+  // Keep unknown legacy and non-chat windows explicit so they fail safe.
   const expectedUnknown = [
-    'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'o3-pro', 'o1', 'o1-pro',
+    'o3-pro', 'o1', 'o1-pro',
     'gpt-4-turbo-2024-04-09', 'gpt-4o-2024-05-13', 'gpt-4-0613', 'gpt-3.5-turbo',
     'gpt-3.5-turbo-0125', 'gpt-3.5-turbo-1106', 'gpt-3.5-turbo-instruct', 'davinci-002',
     'babbage-002', 'chat-latest', 'text-embedding-3-small', 'text-embedding-3-large',
-    'text-embedding-ada-002', 'omni-moderation-latest', 'glm-5.3-flashx', 'glm-ocr'
+    'text-embedding-ada-002', 'omni-moderation-latest', 'glm-ocr'
   ];
   assert.deepEqual(unknown, expectedUnknown, `unexpected models without a window: ${unknown.join(", ")}`);
 });

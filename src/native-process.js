@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { basename, delimiter, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 
@@ -11,7 +11,7 @@ export function resolveNativeCli(name, env = process.env) {
   if (override) {
     const file = resolve(override);
     if (!existsSync(file) || /\.(cmd|bat|ps1)$/i.test(file)) throw new Error(`${name} override must point to an executable or JavaScript entrypoint.`);
-    return /\.[cm]?js$/i.test(file) ? [process.execPath, file] : [file];
+    return /\.[cm]?js$/i.test(file) ? [resolveNodeExecutable(env), file] : [file];
   }
   for (const dir of String(env.PATH || env.Path || '').split(delimiter).filter(Boolean)) {
     const exe = join(dir, process.platform === 'win32' ? `${name}.exe` : name);
@@ -21,7 +21,7 @@ export function resolveNativeCli(name, env = process.env) {
       const native = join(dir, 'node_modules', packageRoot, 'bin', `${name}.exe`);
       const script = join(dir, 'node_modules', packageRoot, name === 'codex' ? 'bin/codex.js' : 'cli.js');
       if (existsSync(native)) return [native];
-      if (existsSync(script)) return [process.execPath, script];
+      if (existsSync(script)) return [resolveNodeExecutable(env), script];
     }
   }
   throw new Error(`${name} CLI not found. Install it and run switchyard login ${name}.`);
@@ -32,6 +32,17 @@ export function subscriptionEnv(env = process.env) {
   // Subscription backends must not silently use an inherited API key or proxy.
   for (const key of Object.keys(result)) if (/^(OPENAI_API_KEY|OPENAI_BASE_URL|CODEX_API_KEY|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY)$/i.test(key)) delete result[key];
   return result;
+}
+
+export function resolveNodeExecutable(env = process.env, { isElectron = Boolean(process.versions.electron), execPath = process.execPath } = {}) {
+  const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
+  if (!isElectron && basename(execPath).toLowerCase() === nodeName) return execPath;
+  if (env.SWITCHYARD_NODE_CLI) return resolve(env.SWITCHYARD_NODE_CLI);
+  for (const dir of String(env.PATH || env.Path || '').split(delimiter).filter(Boolean)) {
+    const candidate = join(dir, nodeName);
+    if (existsSync(candidate)) return candidate;
+  }
+  return nodeName;
 }
 
 export function spawnNative(name, args, options = {}) {
@@ -45,6 +56,7 @@ export class JsonProcess extends EventEmitter {
     this.child = spawnNative(name, args, { stdio: ['pipe', 'pipe', 'pipe'], ...options });
     this.lines = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     this.lines.on('line', line => {
+      if (!line.trim()) return;
       try { this.receive(JSON.parse(line)); }
       catch (error) { this.fail(new Error(`Invalid ${name} protocol message: ${error.message}`)); }
     });

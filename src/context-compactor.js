@@ -86,8 +86,9 @@ export function computeCompactionPlan(messages, options = {}) {
   const list = Array.isArray(messages) ? messages : [];
   const limit = Math.max(Number(options.limit) || DEFAULT_CONTEXT_LIMIT, 2000);
   const threshold = clampRatio(options.threshold, DEFAULT_COMPACT_THRESHOLD);
-  const keepRecent = Number(options.keepRecent ?? DEFAULT_KEEP_RECENT);
-  if (!Number.isInteger(keepRecent) || keepRecent < 1) throw new Error("keepRecent must be a positive number of complete turns");
+  const requestedKeepRecent = Number(options.keepRecent ?? DEFAULT_KEEP_RECENT);
+  if (!Number.isInteger(requestedKeepRecent) || requestedKeepRecent < 1) throw new Error("keepRecent must be a positive number of complete turns");
+  let keepRecent = requestedKeepRecent;
   const completion = Math.max(Number(options.completionTokens ?? DEFAULT_COMPLETION_TOKENS), 0);
   const toolTokens = Math.max(Number(options.toolTokens) || 0, 0);
   const messagesBudget = limit - completion;
@@ -95,27 +96,34 @@ export function computeCompactionPlan(messages, options = {}) {
   const usageRaw = estimateContextTokens(list) + toolTokens;
   const usage = Math.ceil(usageRaw * TOKEN_ESTIMATE_SAFETY);
   const target = messagesBudget * threshold;
-  const base = { usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, toolTokens, keepRecent };
+  const base = { usage: usageRaw, usageScaled: usage, target, limit, messagesBudget, threshold, completion, toolTokens, keepRecent, requestedKeepRecent };
   const noOp = () => ({ ...base, needed: false, keepStart: -1, prefix: [], tail: list, prefixTokens: 0, tailTokens: usageRaw });
   if (!options.force && usage < target) return noOp();
   const turns = conversationTurns(list);
-  const foldTurns = Math.max(0, turns.complete.length - keepRecent);
-  if (!foldTurns) {
-    if (usage > messagesBudget) throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
-    return noOp();
+  const canReduce = options.allowKeepRecentReduction === true;
+  while (true) {
+    const foldTurns = Math.max(0, turns.complete.length - keepRecent);
+    if (!foldTurns) {
+      if (usage <= messagesBudget) return noOp();
+      if (canReduce && keepRecent > 1) { keepRecent -= 1; continue; }
+      throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
+    }
+    const keepStart = turns.complete[foldTurns].start;
+    const prefix = list.slice(0, keepStart);
+    const tail = list.slice(keepStart);
+    const instructions = list.slice(0, turns.instructionsEnd);
+    const retainedTokens = estimateContextTokens([...instructions, ...tail]) + toolTokens;
+    // Reserve room for summary wrapper and validate the actual result again before mutation.
+    const summaryBudget = Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(messagesBudget / TOKEN_ESTIMATE_SAFETY - retainedTokens - 128));
+    if (summaryBudget < 128) {
+      if (canReduce && keepRecent > 1) { keepRecent -= 1; continue; }
+      throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
+    }
+    return { ...base, keepRecent, reducedKeepRecent: keepRecent !== requestedKeepRecent, needed: true, keepStart, prefix, tail, instructions, keptTurns: keepRecent,
+      activeTurn: turns.activeStart !== null, foldedTurns: foldTurns, summaryBudget,
+      prefixTokens: estimateContextTokens(prefix), tailTokens: estimateContextTokens(tail),
+      projectedTokens: Math.ceil((retainedTokens + summaryBudget + 128) * TOKEN_ESTIMATE_SAFETY) };
   }
-  const keepStart = turns.complete[foldTurns].start;
-  const prefix = list.slice(0, keepStart);
-  const tail = list.slice(keepStart);
-  const instructions = list.slice(0, turns.instructionsEnd);
-  const retainedTokens = estimateContextTokens([...instructions, ...tail]) + toolTokens;
-  // Reserve room for summary wrapper and validate the actual result again before mutation.
-  const summaryBudget = Math.min(COMPACT_MAX_OUTPUT_TOKENS, Math.floor(messagesBudget / TOKEN_ESTIMATE_SAFETY - retainedTokens - 128));
-  if (summaryBudget < 128) throw new Error(`Context cannot fit while preserving ${keepRecent} complete turns and the active turn; reduce --compact-keep-recent or use a larger context window.`);
-  return { ...base, needed: true, keepStart, prefix, tail, instructions, keptTurns: keepRecent,
-    activeTurn: turns.activeStart !== null, foldedTurns: foldTurns, summaryBudget,
-    prefixTokens: estimateContextTokens(prefix), tailTokens: estimateContextTokens(tail),
-    projectedTokens: Math.ceil((retainedTokens + summaryBudget + 128) * TOKEN_ESTIMATE_SAFETY) };
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +277,7 @@ export async function compactSession(opts, session, hooks = {}) {
     force: opts.compactForce,
     toolTokens: opts.compactToolTokens,
     keepRecent: opts.compactKeepRecent,
+    allowKeepRecentReduction: !opts.compactKeepRecentExplicit,
     completionTokens: opts.maxTokens
   });
   if (!plan.needed) return null;
@@ -341,6 +350,7 @@ export async function compactSessionDetached(opts, session) {
     limit: opts.contextLimit,
     threshold: opts.compactAt,
     keepRecent: opts.compactKeepRecent,
+    allowKeepRecentReduction: !opts.compactKeepRecentExplicit,
     completionTokens: opts.maxTokens,
     toolTokens: opts.compactToolTokens
   });
@@ -358,7 +368,7 @@ export async function compactSessionDetached(opts, session) {
         "--out", tmpOut,
         "--at", String(opts.compactAt),
         "--limit", String(opts.contextLimit),
-        "--keep-recent", String(opts.compactKeepRecent),
+        "--keep-recent", String(plan.keepRecent),
         "--method", "auto",
         "--provider", opts.provider,
         "--model", opts.model,

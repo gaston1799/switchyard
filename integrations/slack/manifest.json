@@ -1,0 +1,34 @@
+{
+  "display_information": {
+    "name": "Switchyard",
+    "description": "Talk to your Switchyard coding agents from Slack.",
+    "background_color": "#1c1e2b",
+    "long_description": "Connect Slack conversations to Switchyard projects and coding-agent sessions. Send instructions, answer agent questions, and receive progress and results in the conversation assigned to each session. Requires a paired Switchyard installation and a connected messaging relay."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "Switchyard",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "im:history",
+        "im:write"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

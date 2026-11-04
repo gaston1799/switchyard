@@ -10,6 +10,8 @@ import {
   createTask,
   formatAgentMessages,
   listAgents,
+  listAgentMessages,
+  listCoordinationEvents,
   listTasks,
   readAgentInbox,
   sendAgentMessage,
@@ -26,6 +28,7 @@ try {
 
   coordinator = await createAgentRuntime(root, {
     agentId: "coordinator",
+    displayName: "Switchyard Coordinator",
     role: "coordinator",
     mission: "Coordinate the test project.",
     workspace: root,
@@ -34,6 +37,8 @@ try {
   });
   worker = await createAgentRuntime(root, {
     agentId: "worker-1",
+    displayName: "Storage Worker",
+    coordinatorId: "coordinator",
     role: "worker",
     mission: "Implement the bounded task.",
     workspace: root,
@@ -44,6 +49,8 @@ try {
   const live = await listAgents(root);
   assert.deepEqual(live.map((agent) => agent.agentId), ["coordinator", "worker-1"]);
   assert.equal(live.every((agent) => agent.live), true);
+  assert.equal(live[0].displayName, "Switchyard Coordinator");
+  assert.equal(live[1].coordinatorId, "coordinator");
 
   await assert.rejects(
     createAgentRuntime(root, { agentId: "worker-1", role: "worker", workspace: root }),
@@ -63,6 +70,20 @@ try {
   assert.match(formatAgentMessages(inbox), /<agent_message from="coordinator" type="task" task="storage-warning"/);
   assert.equal(await acknowledgeAgentMessages(root, "worker-1", inbox), 1);
   assert.equal((await readAgentInbox(root, "worker-1")).length, 0);
+
+  const coordinatorMessage = await sendAgentMessage(root, {
+    from: "worker-1",
+    to: "coordinator",
+    type: "progress",
+    body: "The storage change is implemented; running focused checks."
+  });
+  const coordinatorInbox = await readAgentInbox(root, "coordinator");
+  assert.equal(coordinatorInbox[0].id, coordinatorMessage.id);
+  assert.equal(await acknowledgeAgentMessages(root, "coordinator", coordinatorInbox), 1);
+  const coordinatorTranscript = await listAgentMessages(root, "coordinator");
+  assert.equal(coordinatorTranscript.length, 1);
+  assert.equal(coordinatorTranscript[0].deliveryState, "processed");
+  assert.equal(coordinatorTranscript[0].from, "worker-1");
 
   const delayed = waitForAgentMessages(root, "worker-1", { timeoutMs: 2000, pollMs: 50 });
   setTimeout(() => {
@@ -104,6 +125,10 @@ try {
   });
   assert.equal(handoff.status, "ready_for_review");
   assert.equal((await listTasks(root))[0].claim.agentId, "worker-1");
+  const eventSnapshot = await listCoordinationEvents(root, { max: 5 });
+  assert.ok(eventSnapshot.total >= 7);
+  assert.ok(eventSnapshot.todayTotal >= 7);
+  assert.ok(eventSnapshot.events.some((event) => event.type === "message_sent"));
 
   await worker.stop("completed");
   worker = null;

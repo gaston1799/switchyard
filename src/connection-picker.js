@@ -1,7 +1,7 @@
 import { JsonProcess } from './native-process.js';
 import { claudeAuthStatus } from './native-backends.js';
 import { getProviderApiKey } from './config.js';
-import { fetchProviderModels, providerConfig } from './providers.js';
+import { fetchProviderModelCatalog, contextLimitFor, hasKnownContextLimit, providerConfig } from './providers.js';
 import { priceModelChoices, PRICING_CHECKED } from './model-pricing.js';
 
 export const CONNECTIONS = [
@@ -19,9 +19,13 @@ export async function discoverModels(opts, activeRpc = null) {
   if (backend === 'api') {
     const key = await getProviderApiKey(opts.provider);
     if (!key) throw new Error(`No ${providerConfig(opts.provider).label} API key configured. Run switchyard config set-${opts.provider === 'deepseek' ? '' : `${opts.provider}-`}key <key>, then retry.`);
-    const models = await fetchProviderModels(opts.provider, key, { baseUrl: opts.baseUrl });
+    const models = await fetchProviderModelCatalog(opts.provider, key, { baseUrl: opts.baseUrl });
     if (!models) throw new Error('The provider model catalog is unavailable. Retry later or enter a model ID manually.');
-    return models.map(id => ({ id, label: id, description: id === opts.model ? 'Current model' : '' }));
+    return models.map(model => ({ ...model, description: [
+      model.description,
+      !/Context:/.test(model.description) && hasKnownContextLimit(model.id) ? `Context: ${contextLimitFor(opts.provider, model.id).toLocaleString('en-US')} tokens (vendor reference)` : '',
+      model.id === opts.model ? 'Current model' : ''
+    ].filter(Boolean).join(' · ') }));
   }
   let rpc = activeRpc;
   try {

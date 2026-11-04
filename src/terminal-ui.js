@@ -1,25 +1,54 @@
 import { emitKeypressEvents } from 'node:readline';
-import { spawnSync } from 'node:child_process';
-
-function enableWindowsConsoleMouseInput(input) {
-  if (process.platform !== 'win32') return { enabled: true, detail: '' };
-  if (input !== process.stdin || !input.isTTY) return { enabled: true, detail: '' };
-  // Node's Windows raw mode enables VT input but drops ENABLE_MOUSE_INPUT.
-  // Reopen CONIN$ directly because the inherited stdin handle may be a duplicate.
-  const source = 'using System; using System.Runtime.InteropServices; public static class SwitchyardConsoleMode { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template); [DllImport("kernel32.dll", SetLastError=true)] private static extern bool GetConsoleMode(IntPtr h, out uint mode); [DllImport("kernel32.dll", SetLastError=true)] private static extern bool SetConsoleMode(IntPtr h, uint mode); [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h); public static int EnableMouseInput() { IntPtr h = CreateFile("CONIN$", 0xC0000000u, 3u, IntPtr.Zero, 3u, 0u, IntPtr.Zero); if (h == new IntPtr(-1)) return 2; uint mode; if (!GetConsoleMode(h, out mode)) { CloseHandle(h); return 3; } bool ok = SetConsoleMode(h, mode | 0x10u); CloseHandle(h); return ok ? 0 : 4; } }';
-  const command = `$source = '${source}'; Add-Type -TypeDefinition $source; $result = [SwitchyardConsoleMode]::EnableMouseInput(); if ($result -ne 0) { exit $result }`;
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
-    stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 5000
-  });
-  if (!result.error && result.status === 0) return { enabled: true, detail: '' };
-  const output = String(result.stderr || result.stdout || '').replace(/\s+/g, ' ').trim().slice(0, 48);
-  const detail = result.error?.code || `exit-${result.status ?? 'unknown'}${output ? ` ${output}` : ''}`;
-  return { enabled: false, detail };
-}
+import { fileURLToPath } from 'node:url';
+import { relative, resolve, sep } from 'node:path';
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 const chars = (s) => [...segmenter.segment(String(s))].map(x => x.segment);
 export const cleanText = (s) => String(s ?? '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+const safeWorkspaceFileLink = (href) => {
+  try {
+    const url = new URL(href);
+    if (url.protocol !== 'file:') return false;
+    const target = resolve(fileURLToPath(url)), root = resolve(process.cwd());
+    const rel = relative(root, target);
+    return rel === '' || rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolutePath(rel);
+  } catch { return false; }
+};
+const isAbsolutePath = (path) => /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('\\\\') || path.startsWith('/');
+function extractWorkspaceLinks(raw) {
+  const links = [], pattern = /\x1b\]8;;([^\x07\x1b]*)(?:\x07|\x1b\\)([\s\S]*?)\x1b\]8;;(?:\x07|\x1b\\)/g;
+  let text = '', cursor = 0, match;
+  while ((match = pattern.exec(String(raw ?? '')))) {
+    text += cleanText(String(raw).slice(cursor, match.index));
+    const label = cleanText(match[2]), start = text.length;
+    text += label;
+    if (label && safeWorkspaceFileLink(match[1])) links.push({ start, end: text.length, href: match[1] });
+    cursor = pattern.lastIndex;
+  }
+  text += cleanText(String(raw ?? '').slice(cursor));
+  const leading = text.length - text.trimStart().length, trimmed = text.trim();
+  return { text: trimmed, links: links.map(link => ({ ...link, start: link.start - leading, end: link.end - leading })).filter(link => link.start >= 0 && link.end <= trimmed.length) };
+}
+function linkedRow(text, links) {
+  let output = '', cursor = 0;
+  for (const link of links) {
+    output += text.slice(cursor, link.start) + `\x1b]8;;${link.href}\x1b\\${text.slice(link.start, link.end)}\x1b]8;;\x1b\\`;
+    cursor = link.end;
+  }
+  return output + text.slice(cursor);
+}
+function wrapEntry(entry, width) {
+  if (!entry.links?.length) return wrapText(entry.text, width);
+  const rows = []; let offset = 0;
+  for (const rawLine of entry.text.split('\n')) {
+    const links = entry.links.filter(link => link.start >= offset && link.end <= offset + rawLine.length)
+      .map(link => ({ ...link, start: link.start - offset, end: link.end - offset }));
+    if (links.length && cellWidth(rawLine) <= width) rows.push(linkedRow(rawLine, links));
+    else rows.push(...wrapText(rawLine, width));
+    offset += rawLine.length + 1;
+  }
+  return rows;
+}
 export function cellWidth(s) {
   return chars(cleanText(s)).reduce((n, c) => {
     const p = c.codePointAt(0);
@@ -44,7 +73,7 @@ export function wrapText(text, width) {
   }
   return rows;
 }
-const clip = (s, w) => wrapText(s, w)[0] || '';
+const clip = (s, w) => cellWidth(s) <= w ? String(s) : wrapText(s, w)[0] || '';
 
 // All terminal writes pass through this owner while the interactive view is open.
 export class TerminalUI {
@@ -53,15 +82,15 @@ export class TerminalUI {
     this.entries = []; this.tools = new Map(); this.queue = []; this.confirmations = [];
     this.draft = []; this.cursor = 0; this.offset = 0; this.phase = 'Ready';
     this.results = false; this.reasoning = false; this.busy = true;
-    this.debugInput = process.env.SWITCHYARD_DEBUG_INPUT === '1';
     this.rawWrite = output.write.bind(output); this.frames = []; this.closed = false;
   }
   start(messages = []) {
     this.oldRaw = this.input.isRaw; this.oldPaused = this.input.isPaused();
     this.oldOut = this.output.write; this.oldErr = this.error.write;
     const capture = (chunk, encoding, cb) => {
-      const text = cleanText(Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === 'string' ? encoding : 'utf8') : chunk).trim();
-      if (text) this.add('notice', text);
+      const raw = Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === 'string' ? encoding : 'utf8') : String(chunk);
+      const parsed = extractWorkspaceLinks(raw);
+      if (parsed.text) Object.assign(this.add('notice', parsed.text), { links: parsed.links });
       const callback = typeof encoding === 'function' ? encoding : cb;
       if (callback) queueMicrotask(callback);
       return true;
@@ -86,10 +115,10 @@ export class TerminalUI {
     this.input.once('end', this.onEnd);
     process.once('exit', this.onExit);
     this.input.setRawMode(true);
-    const mouseSetup = enableWindowsConsoleMouseInput(this.input);
-    this.mouseInputEnabled = mouseSetup.enabled; this.mouseInputDetail = mouseSetup.detail;
     this.input.resume();
-    this.rawWrite('\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[2J');
+    // Clear stale mouse reporting left by older runs, but leave mouse input to
+    // the terminal so text selection and OSC 8 link clicks remain available.
+    this.rawWrite('\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1049h\x1b[?2004h\x1b[2J');
     this.tick = setInterval(() => this.schedule(), 1000); this.tick.unref();
     this.render(); return this;
   }
@@ -166,10 +195,8 @@ export class TerminalUI {
     if (this.selection) {
       const count = this.selectionItems().length;
       this.selection.index = Math.max(0, Math.min(Math.max(0, count - 1), this.selection.index + direction));
-      if (this.debugInput) this.lastInput = button === 64 ? 'wheel-up (previous choice)' : 'wheel-down (next choice)';
     } else {
       this.offset = Math.max(0, this.offset + (button === 64 ? 3 : -3));
-      if (this.debugInput) this.lastInput = button === 64 ? 'wheel-up (+3 rows)' : 'wheel-down (-3 rows)';
     }
     this.schedule();
   }
@@ -187,9 +214,6 @@ export class TerminalUI {
     // SGR mouse wheel events arrive as CSI < button ; x ; y M sequences.
     // Three transcript rows per notch keeps wheel scrolling distinct from PgUp/Dn.
     const sequence = key.sequence || '';
-    if (this.debugInput && (sequence.startsWith('\x1b') || ['pageup', 'pagedown'].includes(key.name))) {
-      this.lastInput = ['pageup', 'pagedown'].includes(key.name) ? key.name : sequence.replaceAll('\x1b', 'ESC');
-    }
     const fullMouse = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(sequence);
     if (fullMouse) {
       this.mouseSequence = undefined;
@@ -241,7 +265,6 @@ export class TerminalUI {
     // while the alternate screen is active instead of sending SGR mouse data.
     if (!this.draft.length && (key.name === 'up' || key.name === 'down')) {
       this.offset = Math.max(0, this.offset + (key.name === 'up' ? 3 : -3));
-      if (this.debugInput) this.lastInput = key.name === 'up' ? 'up-arrow (+3 rows)' : 'down-arrow (-3 rows)';
       this.schedule(); return;
     }
     const pageUp = key.name === 'pageup' || sequence === '\x1b[5~';
@@ -311,7 +334,7 @@ export class TerminalUI {
           }
           rendered.push('');
         } else {
-          for (const text of wrapText(entry.text, contentWidth)) rendered.push(line(text, ['warn', 'error'].includes(entry.kind) ? '93' : '90'));
+          for (const text of wrapEntry(entry, contentWidth)) rendered.push(line(text, ['warn', 'error'].includes(entry.kind) ? '93' : '90'));
         }
         entry.cache = { key: cacheKey, rows: rendered };
       }
@@ -345,8 +368,7 @@ export class TerminalUI {
     while (view.length < bodyHeight) view.push('');
     const elapsed = this.busy && this.started ? ` · ${Math.floor((Date.now() - this.started) / 1000)}s` : '';
     const usage = this.usage ? ` · ${this.usage.prompt.toLocaleString()} in · ${this.usage.completion.toLocaleString()} out · ${this.usage.share}% cached` : this.busy ? ` · ~${this.tokens || 0} generated` : '';
-    const inputDebug = this.debugInput && this.lastInput ? ` · input ${this.lastInput}` : '';
-    const status = `${this.accountLimits ? this.accountLimits + ' · ' : ''}${this.phase}${elapsed}${this.queue.length ? ` · ${this.queue.length} queued` : ''}${this.offset ? ` · ↑ ${this.offset} rows` : ''}${usage}${inputDebug}`;
+    const status = `${this.accountLimits ? this.accountLimits + ' · ' : ''}${this.phase}${elapsed}${this.queue.length ? ` · ${this.queue.length} queued` : ''}${this.offset ? ` · ↑ ${this.offset} rows` : ''}${usage}`;
     const before = this.draft.slice(0, this.cursor).join('').replace(/\n/g, '↵');
     const after = this.draft.slice(this.cursor).join('').replace(/\n/g, '↵');
     const available = Math.max(1, width - 7); let visible = chars(before);
@@ -363,7 +385,7 @@ export class TerminalUI {
       muted(border('╭─ ', modal ? ' Permission ' : ' Message ', '╮')),
       muted('│ ') + paint('96', '› ') + (inputText ? inputBody : muted(inputBody)) + ' '.repeat(Math.max(0, width - cellWidth(inputBody) - 5)) + muted('│'),
       muted(border('╰', '', '╯')),
-      muted(clip(this.debugInput ? `DEBUG INPUT mouse=${this.mouseInputEnabled ? 'on' : `off (${this.mouseInputDetail})`}: ${this.lastInput || 'waiting for key or wheel'}` : this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /permission  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
+      muted(clip(this.draft.join('').startsWith('/') && !this.selection ? '/commands  /model  /provider  /usage  /session  /permission  /exit · Tab complete' : width < 75 ? 'Enter send · PgUp/Dn scroll · Ctrl+E tools' : 'Enter send   Esc stop   PgUp/Dn scroll   Ctrl+R reasoning   Ctrl+E tools', width))
     ];
     if (height < 8) {
       frame.splice(0, frame.length, clip(this.opts.permission === 'yolo' ? 'Switchyard · YOLO MODE' : 'Switchyard', width), ...Array.from({ length: height - 3 }, () => ''), clip(status, width), clip('> ' + inputText, width));

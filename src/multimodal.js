@@ -11,9 +11,9 @@ export function modelCapabilities(provider, model) {
     : p === 'anthropic'
       ? /^claude-(?:3|haiku|sonnet|opus|fable|mythos)/.test(id)
       : p === 'deepseek'
-        ? /(?:vision|vl)/.test(id)
+        ? /(?:vision|vl)/.test(id) || /^(?:deepseek-flash|deepseek-v4-flash)$/.test(id)
         : p === 'glm'
-          ? /(?:vision|\bv\b|\dv(?:-|$)|ocr)/.test(id)
+          ? /(?:vision|\bv\b|\dv(?:-|$)|ocr)/.test(id) || /^glm-5\.3-flash(?:x(?:-legal)?)?$/.test(id)
           : false;
   return {
     vision,

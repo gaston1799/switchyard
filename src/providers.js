@@ -3,8 +3,8 @@ export const PROVIDERS = {
     label: "DeepSeek",
     envKey: "DEEPSEEK_API_KEY",
     baseUrl: "https://api.deepseek.com",
-    model: "deepseek-v4-flash",
-    contextLimit: 1_048_576
+    model: "deepseek-flash",
+    contextLimit: 1_000_000
   },
   glm: {
     label: "GLM",
@@ -23,7 +23,7 @@ export const PROVIDERS = {
   },
   reflection: {
     label: "Reflection AI", envKey: "REFLECTION_API_KEY",
-    baseUrl: "https://api.reflection.ai/openai/v1", model: "Beam-501B-A23B", contextLimit: 262_144
+    baseUrl: "https://api.reflection.ai/openai/v1", model: "Beam-1.0-501B-A23B", contextLimit: 1_048_576
   }
 };
 
@@ -41,19 +41,9 @@ export function providerConfig(provider) {
 /**
  * Context windows, per model.
  *
- * Hardcoded from vendor documentation because NO provider reports them.
- * Re-checked against all three live endpoints on 2026-09-21:
- *   api.deepseek.com/models  -> id, object, owned_by
- *   api.z.ai .../v4/models   -> id, object, created, owned_by
- *   api.openai.com/v1/models -> id, object, created, owned_by, shutdown_date
- * Model NAMES are discoverable at runtime; their windows are not, so this table
- * is the only place the truth can live.
- *
- * Nor can the window be measured cheaply. OpenAI's overflow error is "Your input
- * exceeds the context window of this model" with no figure, so discovery would
- * mean a binary search whose ACCEPTED probes bill hundreds of thousands of input
- * tokens each. Rejections are free; acceptances are not, and an acceptance is the
- * only thing that establishes a lower bound. Not worth real money per model.
+ * Vendor reference windows for API compaction. Most catalogs return IDs only;
+ * Anthropic and Reflection can also supply limits for display. New entries
+ * were checked against vendor documentation on 2026-11-03 without paid probes.
  *
  * CONFIRMED entries come from vendor docs or provider listings. INFERRED
  * entries are marked as such and take the conservative reading of their family,
@@ -98,13 +88,17 @@ const MODEL_CONTEXT_LIMITS = new Map([
   ["deepseek-flash", 1_000_000],
   ["beam-501b-a23b", 262_144],
 
-  // DELIBERATELY ABSENT: gpt-6-astra. It is priced and callable, but no window
-  // is documented here and guessing high is the direction that fails a request
-  // outright rather than merely compacting early. Measuring it means one
-  // ACCEPTED probe of a few hundred thousand tokens at $10/M input -- rejections
-  // are free, acceptances are not, and only an acceptance sets a lower bound.
-  // Left unknown ON PURPOSE so hasKnownContextLimit() keeps warning; add a real
-  // figure here once one is published.
+  // Vendor model pages, checked 2026-11-03. These are API windows; native
+  // subscription backends manage their own account-specific context budgets.
+  ["gpt-6-astra", 1_050_000],
+  ["gpt-6.1-sol", 1_050_000],
+  ["gpt-6.1-terra", 1_050_000],
+  ["gpt-6-sol", 1_050_000],
+  ["gpt-6-luna", 1_050_000],
+  ["beam-1.0-501b-a23b", 1_048_576],
+  ["claude-opus-5-5", 1_000_000],
+  ["claude-sonnet-5-5", 1_000_000],
+  ["claude-haiku-5-5", 1_000_000],
   // Claude -- VERIFIED 2026-09-21 against
   // platform.claude.com/docs/en/build-with-claude/context-windows:
   //   "Claude Fable 5.1, Mythos 5.1, Fable 5, Mythos 5, Opus 5, Opus 4.8,
@@ -144,13 +138,16 @@ const MODEL_CONTEXT_LIMITS = new Map([
   ["glm-5.3", 1_048_576],
 
   // INFERRED. No vendor figure found for these. They sit in the 5.x family, but
-  // "turbo" and "flash" variants are routinely cut down relative to the model
+  // "turbo" variants can be cut down relative to the model
   // they derive from -- glm-4.5-air is exactly that at half its family's
   // window. Held at the conservative floor until someone confirms a number.
   ["glm-5", 131_072],
   ["glm-5-turbo", 131_072],
   ["glm-5.1", 131_072],
-  ["glm-5.3-flash", 131_072],
+  // Native multimodal Flash family: vendor overview, checked 2026-11-03.
+  ["glm-5.3-flash", 1_000_000],
+  ["glm-5.3-flashx", 1_000_000],
+  ["glm-5.3-flashx-legal", 1_000_000],
 
   // DeepSeek V4 — CONFIRMED. Documented as a 1,000,000-token total context for
   // every hosted V4 id. Deliberately the documented round million rather than
@@ -227,25 +224,36 @@ export function hasKnownContextLimit(model) {
  * unreachable models endpoint must not stop an agent starting on a model that
  * would have worked.
  */
-export async function fetchProviderModels(provider, apiKey, { timeoutMs = 15_000, baseUrl, fetchImpl = fetch } = {}) {
+export async function fetchProviderModelCatalog(provider, apiKey, { timeoutMs = 15_000, baseUrl, fetchImpl = fetch } = {}) {
   const normalized = normalizeProvider(provider);
   const endpoint = String(baseUrl || providerConfig(normalized).baseUrl).replace(/\/$/, "");
   if (!apiKey) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const ids = [];
+    const models = new Map();
     let after = "";
     for (let page = 0; page < 20; page++) {
-      const query = normalized === "anthropic" ? `?limit=100${after ? `&after_id=${encodeURIComponent(after)}` : ""}` : "";
+      const query = normalized === "anthropic" ? `?limit=100${after ? `&after_id=${encodeURIComponent(after)}` : ""}` : (after ? `?after=${encodeURIComponent(after)}` : "");
       const response = await fetchImpl(`${endpoint}/models${query}`, {
-        headers: { authorization: `Bearer ${apiKey}`, ...(normalized === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}) },
+        headers: { authorization: `Bearer ${apiKey}`, ...(normalized === "anthropic" ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" } : {}) },
         signal: controller.signal
       });
       if (!response.ok) return null;
       const body = await response.json();
-      ids.push(...(body?.data || body?.models || []).map((entry) => entry?.id || entry?.name).filter((id) => typeof id === "string" && id.length > 0));
-      if (!body.has_more) return ids.length ? [...new Set(ids)] : null;
+      for (const entry of body?.data || body?.models || []) {
+        const id = entry?.id || entry?.name;
+        if (typeof id !== "string" || !id.length || models.has(id)) continue;
+        const label = entry.display_name || entry.displayName || id;
+        const context = Number(entry.context_length || entry.max_input_tokens);
+        const output = Number(entry.max_output_tokens);
+        const description = [
+          Number.isSafeInteger(context) && context > 0 ? `Context: ${context.toLocaleString('en-US')} tokens (provider metadata)` : '',
+          Number.isSafeInteger(output) && output > 0 ? `Max output: ${output.toLocaleString('en-US')} tokens` : ''
+        ].filter(Boolean).join(' · ');
+        models.set(id, { id, label, description });
+      }
+      if (!body.has_more) return models.size ? [...models.values()] : null;
       if (!body.last_id || body.last_id === after) return null;
       after = body.last_id;
     }
@@ -255,4 +263,10 @@ export async function fetchProviderModels(provider, apiKey, { timeoutMs = 15_000
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Preserve the ID-only contract used by launch validation and existing callers.
+export async function fetchProviderModels(provider, apiKey, options) {
+  const models = await fetchProviderModelCatalog(provider, apiKey, options);
+  return models?.map(model => model.id) || null;
 }

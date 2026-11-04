@@ -34,6 +34,10 @@ const server = createServer(async (request, response) => {
     response.end(JSON.stringify({ error: "endpoint unavailable in this mock" }));
     return;
   }
+  if (parsed.tools?.length === 1 && parsed.tools[0].function?.name === 'name_chat') {
+    sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'name-test', type: 'function', function: { name: 'name_chat', arguments: '{"title":"Wake test"}' } }] }, finish_reason: 'tool_calls' }] }]);
+    return;
+  }
   requestCount += 1;
   if (requestCount === 1) {
     sse(response, [{

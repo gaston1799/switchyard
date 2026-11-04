@@ -1,10 +1,11 @@
 {
   "name": "deepseek-detached-agent",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Switchyard: a local coding-agent harness for DeepSeek, GLM, Claude, and GPT.",
   "type": "module",
   "bin": {
     "switchyard": "./src/deepseek-watch.js",
+    "switchyard-cli": "./src/deepseek-watch.js",
     "ds": "./src/deepseek-watch.js",
     "dsw": "./src/deepseek-watch.js",
     "d": "./src/deepseek-watch.js",
@@ -12,11 +13,12 @@
     "dswait": "./src/wait-for-file.js"
   },
   "scripts": {
-    "check": "node --check src/mcp.js && node --check src/workspace-paths.js && node --check src/support-prompt.js && node --check src/multimodal.js && node --check src/model-pricing.js && node --check src/connection-picker.js && node --check src/native-process.js && node --check src/native-backends.js && node --check src/native-chat.js && node --check src/terminal-ui.js && node --check src/provider-transport.js && node --check src/conversation-turns.js && node --check src/api-error.js && node --check src/providers.js && node --check src/provider-balance.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js && node --check src/docker_tools.js && node --check src/update-check.js",
+    "check": "node --check src/toolpacks.js && node --check src/mcp.js && node --check src/workspace-paths.js && node --check src/support-prompt.js && node --check src/multimodal.js && node --check src/model-pricing.js && node --check src/connection-picker.js && node --check src/native-process.js && node --check src/native-backends.js && node --check src/native-chat.js && node --check src/terminal-ui.js && node --check src/provider-transport.js && node --check src/conversation-turns.js && node --check src/api-error.js && node --check src/providers.js && node --check src/provider-balance.js && node --check src/artifacts.js && node --check src/search.js && node --check src/sandbox.js && node --check src/task-state.js && node --check src/triage.js && node --check src/net-tools.js && node --check src/config.js && node --check src/deepseek-request.js && node --check src/download-safety.js && node --check src/session-memory.js && node --check src/agent-coordination.js && node --check src/context-compactor.js && node --check src/deepseek-watch.js && node --check src/skills.js && node --check src/deepseek-detached.js && node --check src/wait-for-file.js && node --check src/ui/main.cjs && node --check src/ui/preload.cjs && node --check src/ui/dashboard-model.cjs && node --check src/offensive_tools.js && node --check src/security_tools.js && node --check src/re_tools.js && node --check src/runtime_tools.js && node --check src/fuzz_tools.js && node --check src/bounty_tools.js && node --check src/docker_tools.js && node --check src/update-check.js && node --check src/ui/file-review.cjs && node --check src/ui/transcript-ui.js",
     "ui": "node src/deepseek-watch.js -ui",
     "test:patch": "node scripts/self-test-patch.cjs",
     "test:skills": "node scripts/self-test-skills.mjs",
     "test:agent-session": "node scripts/self-test-agent-session.mjs",
+    "test:migration": "node scripts/self-test-migration.mjs",
     "test:retry": "node scripts/self-test-retry.mjs",
     "test:security": "node scripts/self-test-security.mjs",
     "test:offensive": "node scripts/self-test-offensive.mjs",
@@ -38,12 +40,16 @@
     "test:sandbox": "node scripts/self-test-sandbox.mjs",
     "test:task-state": "node scripts/self-test-task-state.mjs",
     "test:triage": "node scripts/self-test-triage.mjs",
+    "test:toolpacks": "node --test scripts/self-test-toolpacks.mjs",
     "test:foundation": "node scripts/self-test-foundation.mjs",
     "test:coordination": "node scripts/self-test-coordination.mjs",
+    "test:dashboard": "node scripts/self-test-dashboard.mjs",
+    "test:ui": "node scripts/self-test-ui.mjs && node scripts/self-test-file-review.mjs",
     "test:coordination:e2e": "node scripts/self-test-agent-wake.mjs",
     "smoke": "node src/deepseek-watch.js --help && node src/deepseek-detached.js --help && node src/wait-for-file.js --help",
     "build:exe": "node build-exe.js",
-    "test:pricing": "node --test scripts/self-test-pricing.mjs"
+    "test:pricing": "node --test scripts/self-test-pricing.mjs",
+    "build:ui": "node scripts/build-ui.mjs"
   },
   "devDependencies": {
     "electron": "^42.5.0",
@@ -63,6 +69,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.1.0"
+    "@modelcontextprotocol/client": "^2.1.0",
+    "dompurify": "3.4.16",
+    "marked": "18.1.0"
   }
 }

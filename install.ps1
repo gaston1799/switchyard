@@ -176,17 +176,17 @@ if (Test-Path (Join-Path (Get-Location) ".git")) {
 
 Set-Location $repoDir
 
-# ── install dev dependencies (esbuild, postject) ──────────────────────────────
+# ── install dev dependencies (Electron, esbuild, postject) ────────────────────
 
 Write-Step "Installing build dependencies..."
 Invoke-Npm -NpmArgs @("install")
 if ($LASTEXITCODE -ne 0) { Write-Fail "npm install failed." }
 
-# ── build standalone exes ─────────────────────────────────────────────────────
+# ── build standalone CLI exes and the Electron desktop app ────────────────────
 
-Write-Step "Building standalone executables (esbuild + Node SEA)..."
+Write-Step "Building CLI executables and the Electron desktop app..."
 & node build-exe.js
-if ($LASTEXITCODE -ne 0) { Write-Fail "exe build failed." }
+if ($LASTEXITCODE -ne 0) { Write-Fail "application build failed." }
 
 # ── install exes to Programs dir and add to PATH ──────────────────────────────
 
@@ -194,7 +194,7 @@ $ExeDir = Join-Path $env:LOCALAPPDATA "Programs\dsw"
 Write-Step "Copying executables to $ExeDir..."
 New-Item -ItemType Directory -Force -Path $ExeDir | Out-Null
 
-$aliases = @("switchyard", "dsw", "d", "dsd", "dswait")
+$aliases = @("switchyard-cli", "dsw", "d", "dsd", "dswait")
 foreach ($alias in $aliases) {
   $src  = Join-Path $repoDir "dist\exe\$alias.exe"
   $dest = Join-Path $ExeDir  "$alias.exe"
@@ -205,6 +205,16 @@ foreach ($alias in $aliases) {
     Write-Warn "$alias.exe not found in dist\exe — skipping."
   }
 }
+$CliSource = Join-Path $repoDir "dist\exe\switchyard.exe"
+if (Test-Path $CliSource) {
+  $LegacyCliPath = Join-Path $ExeDir "switchyard.exe"
+  if (Test-Path $LegacyCliPath) {
+    Remove-Item -LiteralPath $LegacyCliPath -Force
+    Write-Ok "Retired the previous console switchyard.exe entry"
+  }
+} else {
+  Write-Warn "CLI executable missing from dist\exe."
+}
 
 $BundledSkills = Join-Path $repoDir "dist\exe\skills"
 if (Test-Path $BundledSkills) {
@@ -214,51 +224,67 @@ if (Test-Path $BundledSkills) {
   Write-Warn "Bundled skills directory not found in dist\exe."
 }
 
-# Register a Start Menu app entry so Windows Search displays Switchyard's icon
-# instead of treating the npm-generated command shim as a generic script.
+# Terminal entry point; `switchyard app` explicitly opens Electron.
+$CliLauncher = '@echo off' + "`r`n" + '@"%~dp0d.exe" %*' + "`r`n"
+Set-Content -LiteralPath (Join-Path $ExeDir "switchyard.cmd") -Value $CliLauncher -Encoding Ascii
+
+# Install the Electron runtime and app as a real Windows desktop application.
+$DesktopSource = Join-Path $repoDir "dist\desktop"
+$DesktopDir = Join-Path $env:LOCALAPPDATA "Programs\Switchyard"
+$DesktopExe = Join-Path $DesktopDir "Switchyard.exe"
 $IconSrc = Join-Path $repoDir "icon.ico"
-$IconDest = Join-Path $ExeDir "icon.ico"
-$SwitchyardExe = Join-Path $ExeDir "switchyard.exe"
-if ((Test-Path $SwitchyardExe) -and (Test-Path $IconSrc)) {
-  Copy-Item $IconSrc $IconDest -Force
+if ((Test-Path (Join-Path $DesktopSource "Switchyard.exe")) -and (Test-Path $IconSrc)) {
+  New-Item -ItemType Directory -Force -Path $DesktopDir | Out-Null
+  Copy-Item (Join-Path $DesktopSource "*") $DesktopDir -Recurse -Force
   $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
   New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
   $ShortcutPath = Join-Path $StartMenu "Switchyard.lnk"
   $Shell = New-Object -ComObject WScript.Shell
   $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-  $Shortcut.TargetPath = $SwitchyardExe
-  $Shortcut.WorkingDirectory = $env:USERPROFILE
-  $Shortcut.IconLocation = "$IconDest,0"
-  $Shortcut.Description = "Switchyard AI agent harness"
+  $Shortcut.TargetPath = $DesktopExe
+  $Shortcut.WorkingDirectory = $repoDir
+  $Shortcut.IconLocation = "$(Join-Path $DesktopDir 'icon.ico'),0"
+  $Shortcut.Description = "Switchyard Desktop AI workspace"
   $Shortcut.Save()
-  Write-Ok "Start Menu shortcut with Switchyard icon"
+  Write-Ok "Electron desktop app and Start Menu shortcut with Switchyard icon"
 } else {
-  Write-Warn "Switchyard executable or icon missing; skipping Start Menu shortcut."
+  Write-Warn "Electron desktop app or icon missing; skipping Start Menu shortcut."
+}
+
+# Retire npm's old generic command shim so Windows Search resolves Switchyard
+# to the branded Start Menu app. The dedicated CLI launcher lives in Programs/dsw.
+$NpmShimDir = Join-Path $env:APPDATA "npm"
+foreach ($extension in @(".cmd", ".ps1", "")) {
+  $LegacyShim = Join-Path $NpmShimDir "switchyard$extension"
+  if (Test-Path $LegacyShim) {
+    $shimText = Get-Content -LiteralPath $LegacyShim -Raw -ErrorAction SilentlyContinue
+    if ($shimText -match "deepseek-detached-agent[\\/]src[\\/]deepseek-watch\.js") {
+      Remove-Item -LiteralPath $LegacyShim -Force
+      Write-Ok "Removed old npm switchyard shell shim ($extension)"
+    }
+  }
 }
 
 # Add ExeDir to the user PATH (persistent, via registry)
 Write-Step "Updating user PATH..."
 $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-if ($userPath -notlike "*$ExeDir*") {
-  $newPath = if ($userPath) { "$userPath;$ExeDir" } else { $ExeDir }
-  [System.Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-  $env:PATH = "$env:PATH;$ExeDir"
-  Write-Ok "Added $ExeDir to user PATH."
-} else {
-  Write-Ok "$ExeDir already on PATH."
-  $env:PATH = "$env:PATH;$ExeDir"   # refresh current session anyway
-}
+$pathEntries = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $ExeDir -and $_ -ne $DesktopDir })
+$newPath = (@($ExeDir, $DesktopDir) + $pathEntries -join ';')
+[System.Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+$currentEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ne $ExeDir -and $_ -ne $DesktopDir })
+$env:PATH = (@($ExeDir, $DesktopDir) + $currentEntries -join ';')
+Write-Ok "Updated user PATH with CLI launcher before the desktop directory."
 
-# ── verify ────────────────────────────────────────────────────────────────────
 
 Write-Host ""
-if (Test-Command "switchyard") {
-  Write-Ok "switchyard.exe is on PATH and working."
-  Write-Ok "Also available: d  dsw  dsd  dswait"
+if ((Test-Path $DesktopExe) -and (Test-Command "switchyard")) {
+  Write-Ok "Switchyard Desktop is installed and available from Start or switchyard app."
+  Write-Ok "Terminal harness commands: switchyard  switchyard-cli  d  dsw  dsd  dswait"
 } else {
-  Write-Warn "switchyard not found yet — open a new terminal window and try: switchyard --help"
+  Write-Warn "Switchyard Desktop install incomplete; open a new terminal after installation."
 }
 
 Write-Host ""
-Write-Host "  Set your API key:  switchyard config set-key <your-deepseek-key>" -ForegroundColor DarkGray
+Write-Host "  Open desktop app:  switchyard app" -ForegroundColor DarkGray
+Write-Host "  Terminal CLI:      switchyard --help" -ForegroundColor DarkGray
 Write-Host ""

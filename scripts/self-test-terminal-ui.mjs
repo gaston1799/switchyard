@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { TerminalUI, cellWidth, wrapText } from '../src/terminal-ui.js';
 
 function fixture(t) {
@@ -70,7 +71,8 @@ test('mouse wheel scrolls three rows while PageUp and PageDown remain page sized
   const { ui, input, output, bytes } = fixture(t);
   for (let i = 0; i < 80; i++) ui.add('user', `message ${i}`);
   ui.render();
-  assert.ok(bytes().includes('\x1b[?1000h\x1b[?1002h\x1b[?1006h'));
+  assert.ok(bytes().includes('\x1b[?1006l\x1b[?1002l\x1b[?1000l'));
+  assert.ok(!bytes().includes('\x1b[?1000h'));
   input.write(Buffer.from([27, 91, 60, 54, 52, 59, 50, 48, 59, 56, 77]));
   assert.equal(ui.offset, 3); assert.equal(ui.draft.join(''), '');
   input.write(Buffer.from([27, 91, 60, 54, 53, 59, 50, 48, 59, 56, 77]));
@@ -83,32 +85,26 @@ test('mouse wheel scrolls three rows while PageUp and PageDown remain page sized
 });
 test('real readline keypress parsing scrolls a long transcript without editing the draft', t => {
   const { ui, input, output } = fixture(t);
-  ui.debugInput = true;
   for (let i = 0; i < 500; i++) ui.add('assistant', `large transcript row ${i}: ${'detail '.repeat(8)}`);
   ui.render();
   const latest = ui.frames.join('\n');
   input.write(Buffer.from([0x1b, 0x5b, 0x35, 0x7e])); // PageUp
   ui.render();
   assert.equal(ui.offset, output.rows - 8);
-  assert.equal(ui.lastInput, 'pageup');
-  assert.ok(ui.frames.at(-1).includes('DEBUG INPUT mouse=on: pageup'));
   assert.notEqual(ui.frames.join('\n'), latest);
   assert.equal(ui.draft.join(''), '');
   input.write(Buffer.from([0x1b, 0x5b, 0x36, 0x7e])); // PageDown
   ui.render();
   assert.equal(ui.offset, 0);
-  assert.equal(ui.lastInput, 'pagedown');
   assert.equal(ui.draft.join(''), '');
   input.write(Buffer.from([0x1b, 0x5b, 0x41])); // Windows Terminal wheel-up alternate-scroll fallback
   ui.render();
   assert.equal(ui.offset, 3);
-  assert.equal(ui.lastInput, 'up-arrow (+3 rows)');
   input.write(Buffer.from([0x1b, 0x5b, 0x42])); // wheel-down
   ui.render();
   assert.equal(ui.offset, 0);
   input.write(Buffer.from([27, 91, 60, 54, 52, 59, 50, 48, 59, 56, 77])); // SGR wheel up
   assert.equal(ui.offset, 3);
-  assert.equal(ui.lastInput, 'wheel-up (+3 rows)');
 });
 test('close restores stream writers, raw mode and alternate screen', t => {
   const { ui, input, output, error, write, bytes } = fixture(t);
@@ -211,18 +207,25 @@ test('CSI-u Shift+Enter inserts a newline and keypad Enter submits the draft', a
 
 test('mouse wheel moves through saved-session style pickers', async t => {
   const { ui, input } = fixture(t);
-  ui.debugInput = true;
   const items = Array.from({ length: 30 }, (_, i) => ({ id: `session-${i}`, label: `Session ${i}`, description: 'Saved work' }));
   const picked = ui.select('Resume a session', 'Choose saved work', items);
   const wheel = button => input.write(Buffer.from([27, 91, 60, ...Buffer.from(`${button};20;8M`)]));
   wheel(65);
   assert.equal(ui.selection.index, 1);
-  assert.equal(ui.lastInput, 'wheel-down (next choice)');
   wheel(64);
   assert.equal(ui.selection.index, 0);
-  assert.equal(ui.lastInput, 'wheel-up (previous choice)');
   ui.key('', { name: 'escape' });
   assert.equal(await picked, null);
+});
+
+test('TUI leaves mouse clicks to the terminal and preserves safe workspace file links', t => {
+  const { ui, output, bytes } = fixture(t);
+  const href = pathToFileURL(join(process.cwd(), 'src', 'terminal-ui.js')).href;
+  output.write(`  \x1b]8;;${href}\x1b\\src/terminal-ui.js\x1b]8;;\x1b\\\n`);
+  ui.render();
+  assert.equal(ui.entries.at(-1).text, 'src/terminal-ui.js');
+  assert.ok(bytes().includes(`\x1b]8;;${href}\x1b\\src/terminal-ui.js\x1b]8;;\x1b\\`));
+  assert.ok(!bytes().includes('\x1b[?1000h'));
 });
 
 test('slash command completion does not submit text', t => {

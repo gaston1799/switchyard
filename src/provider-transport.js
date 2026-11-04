@@ -134,8 +134,9 @@ export function buildProviderRequest(opts, messages, { apiKey, stream = false, t
       system: messages.filter((m) => ["system", "developer"].includes(m.role)).map((m) => contentText(m.content)).join("\n\n"),
       messages: anthropicMessages(messages, opts), cache_control: { type: "ephemeral" } };
     if (tools.length) body.tools = tools.map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }));
+    if (tools.length && opts.toolChoice) body.tool_choice = { type: "tool", name: opts.toolChoice };
     if (opts.thinking === "enabled" && !opts.compactionRequest) {
-      if (/^claude-(?:sonnet|opus)-(?:4-6|[5-9](?:[.-]|$))/.test(model)) body.thinking = { type: "adaptive" };
+      if (/^claude-(?:(?:sonnet|opus)-(?:4-6|[5-9](?:[.-]|$))|(?:haiku|fable|mythos)-[5-9](?:[.-]|$))/.test(model)) body.thinking = { type: "adaptive" };
       else if (body.max_tokens > 1024) body.thinking = { type: "enabled", budget_tokens: Math.min(4096, body.max_tokens - 1) };
     }
   } else if (config.protocol === "responses") {
@@ -143,8 +144,9 @@ export function buildProviderRequest(opts, messages, { apiKey, stream = false, t
     body = { model, stream, store: false, input: responseInput(messages, opts), max_output_tokens: opts.maxTokens || 16384,
       include: ["reasoning.encrypted_content"] };
     if (tools.length) body.tools = tools.map(({ function: tool }) => ({ type: "function", ...tool, strict: false }));
+    if (tools.length && opts.toolChoice) body.tool_choice = { type: "function", name: opts.toolChoice };
     if (/^(gpt-[5-9]|o[134])/.test(model)) {
-      body.reasoning = { effort: opts.thinking === "disabled" || opts.compactionRequest ? (/^gpt-5(?:-|$)|^o/.test(model) ? "minimal" : "none") : (opts.effort === "max" ? "high" : opts.effort || "high") };
+      body.reasoning = { effort: opts.thinking === "disabled" || opts.compactionRequest ? (/^gpt-5(?:-|$)|^o/.test(model) ? "minimal" : "none") : (opts.effort === "max" && !/^gpt-6(?:\.|-)/.test(model) ? "high" : opts.effort || "high") };
     }
     // Deterministic per-session routing key; never contains prompts or credentials.
     body.prompt_cache_key = createHash("sha256").update(`${opts.session || opts.agentId || "switchyard"}:${opts.compactionRequest ? "summary" : "agent"}`).digest("hex");
@@ -159,6 +161,7 @@ export function buildProviderRequest(opts, messages, { apiKey, stream = false, t
     } else applyThinkingOptions(body, opts);
     if (stream) body.stream_options = { include_usage: true };
     if (tools.length) body.tools = tools;
+    if (tools.length && opts.toolChoice) body.tool_choice = { type: "function", function: { name: opts.toolChoice } };
   }
   return { url: `${base}/${endpoint}`, init: { method: "POST", headers: providerHeaders(provider, apiKey), body: JSON.stringify(body) } };
 }

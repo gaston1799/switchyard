@@ -2,7 +2,7 @@
 
 > A local coding-agent harness for DeepSeek, GLM, Claude, GPT, and Reflection Beam. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
 
-`switchyard` is the main command. `d`, `dsw`, and `ds` remain interactive aliases; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.
+`switchyard` opens the Electron desktop app with no arguments and forwards CLI arguments to the terminal harness. Use `d` or `dsw` for the interactive CLI; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.
 
 [![Node.js ≥ 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -117,7 +117,7 @@ irm https://raw.githubusercontent.com/gaston1799/switchyard/master/install.ps1 |
 
 Or download [`install.bat`](install.bat) and double-click it.
 
-The installer checks for **Git** and **Node.js ≥ 18**, installs any missing deps via `winget`, refreshes `PATH`, clones the repo, then runs `npm install -g`.
+The installer checks for **Git** and **Node.js ≥ 20**, installs missing dependencies via `winget`, clones or updates the repo, downloads Electron, and builds both the desktop app and terminal executables. It installs the Electron app under `%LOCALAPPDATA%\Programs\Switchyard`, creates a branded Start Menu shortcut, and adds the app and CLI folders to `PATH`.
 
 ### Manual
 
@@ -126,6 +126,8 @@ git clone https://github.com/gaston1799/switchyard
 cd switchyard
 npm install -g .
 ```
+
+The npm-only setup installs the terminal commands `d` and `dsw`. Run the Windows installer to add the Electron app, the `switchyard` command, and the Start Menu shortcut.
 
 ---
 
@@ -138,10 +140,13 @@ switchyard config set-key sk-xxxxxxxxxxxxxxxx
 # Ask a question
 switchyard -p "explain this codebase"
 
-# Open the TUI dashboard (no args)
+# Open the TUI dashboard
+switchyard --tui
+
+# Open the Electron desktop app
 switchyard
 
-# Open the Electron desktop UI
+# Open the Electron desktop UI with a CLI-managed workspace
 d -ui
 
 # Resume a previous session
@@ -151,6 +156,33 @@ switchyard --resume
 ---
 
 ## Startup and local commands
+
+### Optional toolpacks
+
+API sessions expose `list_toolpacks` and `load_toolpack`. Load `development`
+for `project_checks` (discover/run npm scripts, including builds), `git_review`
+(branch/status, staged and unstaged summaries, recent commits), `service_inspect`
+(managed process logs and local HTTP readiness), and `session_diagnostics`
+(context estimates, token/cost estimates, cached provider budget, heartbeat
+states, inbox counts, and recent tool errors). Loaded packs persist on resume;
+their schemas are included only after loading. Existing Codex/Claude skills
+remain reusable through normal skill discovery.
+
+`process_manage` start/stop and project-check execution follow command
+permissions. Managed stops verify process creation identity as well as PID;
+legacy records without that identity require manual inspection. Readiness
+checks report endpoint responses, not proof of which process owns a port.
+
+Load `slack` for the `slack` tool with `status`, `read`, and `send` actions.
+Configure `SWITCHYARD_SLACK_BOT_TOKEN` locally (or `SLACK_BOT_TOKEN`); never
+provide a token through model tool arguments. Reads return one bounded page
+and a continuation cursor. Sends require interactive confirmation, are blocked
+in review/headless sessions, and are never automatically retried. Your bot
+needs the appropriate Slack scopes and access to the conversation. This does
+not deploy the hosted relay, OAuth installation, or mobile pairing service.
+
+Native Codex/Claude backends retain their CLI's own tools; these toolpacks apply
+to Switchyard API sessions.
 
 Run `switchyard` with no arguments. The styled startup screens guide you through:
 
@@ -165,6 +197,15 @@ not a guarantee of entitlement. If discovery fails, the picker labels the error
 and offers manual model entry instead of inventing an available-model list.
 Sign-in uses the existing `switchyard login codex|claude` commands; API keys use
 `switchyard config set-<provider>-key` (`set-key` for DeepSeek).
+
+The desktop model menu includes **Refresh models** to reload the selected
+connection without changing its current model. New catalog IDs remain selectable
+even when their price is unknown. Native Codex/Claude catalogs depend on the
+installed CLI version and signed-in account; keep those CLIs updated if a model
+is missing. API pricing and context references were refreshed on 2026-11-03 for
+GPT-6.1 Terra, Claude Haiku 5.5, GLM-5.3 FlashX Legal, and Beam 1.0. The picker
+shows long-context pricing thresholds where published. Catalog checks do not
+make billed completion requests.
 
 Type `/` for command hints; Tab completes a command. These are handled locally:
 
@@ -293,8 +334,9 @@ a saved session retains its own backend.
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `switchyard` | `d`, `dsw`, `ds` | Interactive agent — streams thinking, calls tools, saves sessions |
-| `switchyard -ui` | `d -ui` | Electron desktop UI with HTTP control API and CDP debugging port |
+| `switchyard` | Start Menu shortcut | Electron desktop app; command-line arguments are forwarded to the harness |
+| `d`, `dsw` | — | Interactive agent — streams thinking, calls tools, saves sessions |
+| `d -ui` | `switchyard -ui` | Electron desktop UI with HTTP control API and CDP debugging port |
 | `switchyard balance` | — | Read DeepSeek credit; `--minimum <usd>` exits 2 below the reserve floor |
 | `dsd` | — | Fire-and-forget: prompt → Markdown file, optional Claude fallback |
 | `dswait` | — | Poll until a detached output file appears |
@@ -345,6 +387,7 @@ d -ui --ui-port 17891 --ui-cdp-port 9223
 ```
 
 - UI control API: `http://127.0.0.1:17891`
+- Dashboard snapshot: `GET /dashboard` (session and agent counts, recent activity, health, and usage analytics)
 - CDP / remote debugging: `http://127.0.0.1:9223`
 - Health check: `GET /health`
 - List saved sessions: `GET /sessions`
@@ -353,7 +396,17 @@ d -ui --ui-port 17891 --ui-cdp-port 9223
 - Resume a session from the API: include `{"sessionPath":"C:\\path\\to\\session.json"}` in `POST /chat`
 - Inspect runs: `GET /runs` and `GET /runs/<id>`
 
-The UI delegates chat execution back to the existing `d` CLI, reads the same `.deepseek-watch/sessions/*.json` files as the TUI, renders chat history/tool calls/tool results, and writes per-run output under `.deepseek-watch/ui/<run-id>/`.
+The UI delegates chat execution to its bundled `d.exe`, reads saved sessions from Switchyard's central data directory (`%USERPROFILE%\.switchyard\sessions` by default), renders chat history/tool calls/tool results, and writes per-run output under the current workspace's `.deepseek-watch/ui/<run-id>/`. The chat composer discovers configured API providers and signed-in Codex/Claude models, shows published token pricing where known, and lets you select a model for the next run. Paste an image into the composer or use the attachment button; the image is saved with that run and the model is directed to use its available image inspection tool. Existing API chats can switch API provider/model; native Codex and Claude chats stay on their native backend.
+
+Assistant messages render sanitized Markdown, including headings, lists, tables, blockquotes, and fenced code with a copy button. Reasoning stays hidden; tool activity uses expandable rows with local SVG category icons. The final response includes a files-touched card with three initial paths, an expandable list, and read-only Review. File paths come from the session's recorded edits; Git counts and diffs compare the current working tree with HEAD and may include earlier edits. They are not per-response edit counts, and no Undo operation is offered. Files outside the workspace or without an available diff are labeled accordingly.
+
+Run `npm run build:ui` after updating the Markdown dependencies or SVG icon sources. The generated browser bundle and icon registry are shipped locally; `npm run build:exe` rebuilds them automatically. `npm run test:ui` checks renderer syntax, transcript grouping, and file-review behavior. The browser checks in `scripts/self-test-ui-browser.js` are for an isolated fixture preview.
+
+The desktop overview links coordination agents by stable agent ID while showing their display names and coordinator/worker hierarchy. Analytics totals come from saved session usage. Cost is shown only as an estimate for API turns with a known Switchyard price; subscription sessions, custom endpoints, and unknown prices are excluded and counted as unpriced.
+
+When a saved session belongs to a coordination agent, the Electron chat also shows messages addressed to that agent, including messages already acknowledged by the agent. Each agent still keeps its own session file; the UI combines the coordinator's session transcript with its coordination inbox history for monitoring.
+
+New API-backed chats receive a one-time model-generated title before normal tools become available. The naming turn exposes only `name_chat`; interrupted naming remains pending, and providers that cannot complete the tool call fall back to a short title derived from the first prompt. Native Codex and Claude sessions use a prompt-based title because their CLIs own the tool loop. Existing sessions without a title use the same fallback. Titles can be renamed in the Electron session list.
 
 ![Electron UI showing saved session history](docs/images/electron-session-history.png)
 
@@ -623,6 +676,13 @@ chat image shape. Text-only models do not see that tool and receive
 `analyze_image_openai` instead. That fallback makes a separate OpenAI vision
 request and returns text, so it requires an OpenAI API key.
 
+`deepseek-flash` is currently DeepSeek V4.1 Flash and receives `view_image`;
+`analyze_image_openai` is hidden and rejected for vision-capable models. The
+retired `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` IDs still route to
+the current Flash model. Native viewing sends images to the active provider
+and needs no OpenAI key. Pasted images already attached to a message do not
+need a tool call; `view_image` loads images from workspace files.
+
 Image output follows the same rule. Supported GPT sessions receive
 `generate_image`; other providers receive `generate_image_openai`. Both use the
 OpenAI Responses image-generation tool, save the PNG at the requested workspace
@@ -762,6 +822,17 @@ If Google returns an access error such as `This project does not have the access
 
 ## Session memory
 
+New sessions are stored centrally under `~/.switchyard/sessions` (Windows: `%USERPROFILE%\.switchyard\sessions`). Set `SWITCHYARD_DATA_DIR` to choose another data root. Coordination boards are stored separately under `~/.switchyard/coordination/workspaces/<workspace-id>` by default, so agents from different workspaces do not join the same board. Explicit `--coord-dir` paths still select a shared board.
+
+Migrate legacy session and coordination data without deleting the originals:
+
+```sh
+switchyard migrate --dry-run
+switchyard migrate --copy
+```
+
+The scanner searches every accessible mounted drive for `.deepseek-watch` and `.deepseek-watch-agent` folders. It copies session JSON and coordination data to the central store, updates copied sessions and agent records to the new paths, and writes `~/.switchyard/migration-manifest.json` with source-to-destination mappings. Working directories remain at their original project paths. Active sessions and coordination boards are left in place; copied sessions continue to reference the original board path. Junctions and symlinks are skipped; inaccessible paths are reported. Existing source folders are never removed.
+
 Sessions are saved to `.deepseek-watch/sessions/` in the working directory.
 
 ```bash
@@ -773,6 +844,25 @@ switchyard --no-save-session               # ephemeral — nothing written
 ---
 
 ## Troubleshooting
+
+### Desktop projects and agent messages
+
+Desktop navigation lives in the window title bar. Use **New project** to choose
+a working directory; projects are saved in `~/.switchyard/projects.json`.
+New chat keeps the selected project. Every chat and spawned worker uses that
+project's working directory and shared coordination board. Existing saved
+workspace/board pairs are discovered without moving or merging sessions.
+
+Each project has a flat chat list with coordinator/worker indicators. A spinning
+circle means the process is live; hover to distinguish working from waiting for
+a message. Parked agents make no model requests while waiting. Sending directly
+to a live worker queues an inbox message and informs its coordinator; sending to
+a stopped worker resumes its saved session. The composer reports queued,
+received, or failed delivery. Retrying a failed send preserves its message ID.
+
+Run `node scripts/self-test-project-routing.mjs` for the offline integration
+test. Its explicit `--live` mode uses DeepSeek, checks the balance, and refuses
+requests that could reduce the remaining balance below USD 3.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
