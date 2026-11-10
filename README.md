@@ -181,6 +181,23 @@ in review/headless sessions, and are never automatically retried. Your bot
 needs the appropriate Slack scopes and access to the conversation. This does
 not deploy the hosted relay, OAuth installation, or mobile pairing service.
 
+Load `computer` for native Windows desktop control. It compiles a bundled C#
+helper (`src/computer_use_helper/`) on first use into
+`~/.switchyard/bin/computer-use-helper-<hash>.exe` and keeps one helper process
+per session, so UI Automation element indexes stay valid between an observation
+and the action that follows it. Tools: `computer_windows`, `computer_observe`,
+`computer_ui_tree`, `computer_doctor`, `computer_focus`, `computer_click`,
+`computer_type`, `computer_key`, `computer_scroll`, `computer_drag`,
+`computer_set_value`, `computer_invoke`, and `computer_launch`. Capture uses
+`PrintWindow` with a screen-copy fallback, input uses `SendInput`, and structure
+comes from UI Automation. Snapshots are compact by default: the walk starts at the
+page content root and emits `@eN` refs, which map straight to `element_index`.
+For browser page content prefer `pbc`, which reads the DOM over CDP; Computer Use
+covers native windows and surfaces pbc cannot reach. Requires Windows PowerShell
+5.1 with .NET Framework 4.x reference assemblies. Review sessions block it, and mutating calls confirm unless
+the session is `full`/`yolo`. `npm run test:computer` verifies the runtime; set
+`COMPUTER_USE_INPUT_TEST=1` to include the focus/click/type self-test.
+
 Native Codex/Claude backends retain their CLI's own tools; these toolpacks apply
 to Switchyard API sessions.
 

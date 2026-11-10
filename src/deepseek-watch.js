@@ -22,6 +22,7 @@ import { runRuntimeTool, runtimeToolSchemas } from "./runtime_tools.js";
 import { runFuzzTool, fuzzToolSchemas } from "./fuzz_tools.js";
 import { runBountyTool, bountyToolSchemas } from "./bounty_tools.js";
 import { runDockerTool, dockerToolSchemas } from "./docker_tools.js";
+import { runComputerTool, shutdownComputerUse } from "./computer_tools.js";
 import { checkForUpdates, clearSkipped, isSkipped, performUpdate, setSkipped } from "./update-check.js";
 import { createMarkdownWriter, formatDuration, ToolCallTracker } from "./tui.js";
 import { TerminalUI } from "./terminal-ui.js";
@@ -5269,6 +5270,10 @@ function patchEolTolerant(content, oldString, newString, { replaceAll = false } 
     return runBountyTool(name, args, { ...opts, askYesNo }, { cwd: process.cwd(), taskId: taskKey });
   }
 
+  if (name.startsWith("computer_")) {
+    return runComputerTool(name, args, { ...opts, askYesNo }, { cwd: process.cwd(), taskId: taskKey });
+  }
+
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -6976,6 +6981,7 @@ async function run() {
     await opts.agentRuntime.stop("failed", { error: error.message });
     throw error;
   } finally {
+    await shutdownComputerUse().catch(() => {});
     await opts.mcpManager?.close();
     opts.ui?.close();
     if (opts.ui) process.stdin.pause();

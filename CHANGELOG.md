@@ -1,5 +1,24 @@
 # Switchyard releases
 
+## v0.5.0 - 2026-11-10
+
+### Added
+
+- Native Windows Computer Use toolpack (`load_toolpack {"name":"computer"}`):
+  window enumeration, occlusion-tolerant capture, UI Automation trees with
+  stable element indexes, `SendInput` click/type/key/scroll/drag, and
+  pattern-based invoke/set-value. A bundled C# helper is compiled on demand and
+  kept alive per session; captures return as native image content so the model
+  sees them directly. Desktop control stays blocked in review sessions and
+  confirms every mutating call outside `full`/`yolo`. `npm run test:computer`
+  covers the runtime, with an opt-in focus/click/type self-test.
+- Compact accessibility snapshots (`compact`, default on): the tree starts at the
+  page content root and uses `@eN` refs, so a browser page reports 10 nodes
+  instead of 59. `@eN` maps directly to `element_index`.
+- The `computer-use` skill routes browser pages to `pbc` and native windows to
+  `computer_*`, because pbc reads the DOM while UI Automation only sees what the
+  renderer chooses to publish.
+
 ## v0.3.3 — 2026-10-07
 
 Fixes terminal scrolling after incomplete mouse input. Page Up/Down sequences are
