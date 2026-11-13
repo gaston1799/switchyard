@@ -4,8 +4,8 @@ import { homedir, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { switchyardDataRoot } from "./data-store.js";
 
-const COORDINATION_MARKERS = ["agents", "inbox", "processed", "tasks", "claims", "events"];
-const LIVE_STATES = new Set(["starting", "working", "waiting", "parked"]);
+const COORDINATION_MARKERS = ["agents", "inbox", "processed", "tasks", "claims", "events", "decisions"];
+const LIVE_STATES = new Set(["starting", "working", "waiting", "parked", "waiting_for_message"]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");

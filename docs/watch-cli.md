@@ -1,5 +1,10 @@
 # Watch CLI
 
+Switchyard's decision commands are `switchyard decisions list|get|history|resolve`.
+See [Decision Management v1](decision-management-implementation.md) for authority,
+resolution examples, task dependencies and recovery. The historical command and
+path names below remain compatibility aliases.
+
 `deepseek-watch` is the visible terminal wrapper. Use it when you want to watch DeepSeek's reasoning stream and tool-call requests before moving the same workflow into detached mode.
 
 ```powershell
