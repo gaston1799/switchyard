@@ -63,6 +63,7 @@ import { formatMigrationReport, migrateLegacyData } from "./migration.js";
 import { switchyardDataRoot } from "./data-store.js";
 import { TOOLPACKS, TOOLPACK_DISCOVERY_SCHEMAS, toolpackSchemas, toolpackForTool, slackRequest } from './toolpacks.js';
 import { modelPrice } from './model-pricing.js';
+import { DECISION_TOOL_SCHEMAS, reconcileDecisionNotifications, runDecisionTool, runDecisionsCli } from './decision-tools.js';
 import { usageTotals } from './ui/dashboard-model.cjs';
 
 const DEFAULT_PROVIDER = "deepseek";
@@ -94,6 +95,8 @@ Usage:
   switchyard wake <agent-id> [message] [--from <agent-id>] [--coord-dir <dir>]
   switchyard inbox <agent-id> [--coord-dir <dir>]
   switchyard tasks [--coord-dir <dir>]
+  switchyard decisions list|get <id>|history <id>|resolve <id> [--coord-dir <dir>]
+    resolve requires --expected-revision <n> --resolution <text> --reasoning <text> [--status approved|rejected|...]
   switchyard security allow <domain>
   switchyard security remove <domain>
   switchyard security list
@@ -3067,7 +3070,8 @@ function toolSchemas(opts) {
             description: { type: "string" },
             scope: { type: "array", items: { type: "string" }, description: "Paths/components exclusively owned by the task." },
             acceptance_criteria: { type: "array", items: { type: "string" } },
-            depends_on: { type: "array", items: { type: "string" } }
+            depends_on: { type: "array", items: { type: "string" } },
+            decision_dependencies: { type: "array", items: { type: "string" }, description: "Required decision IDs. Unapproved decisions block this task; changed revisions require review and a fresh agent_claim." }
           },
           required: ["task_id", "title"],
           additionalProperties: false
@@ -3220,9 +3224,10 @@ function toolSchemas(opts) {
       }
     }
   );
+  schemas.push(...DECISION_TOOL_SCHEMAS);
   const caps = modelCapabilities(opts.provider, opts.model);
   let available = opts.permission === "review"
-    ? schemas.filter((schema, index) => index < reviewSchemaCount || schema.function?.name?.startsWith("agent_"))
+    ? schemas.filter((schema, index) => index < reviewSchemaCount || schema.function?.name?.startsWith("agent_") || ['decision_list', 'decision_get', 'decision_history'].includes(schema.function?.name))
     : schemas;
   available = available.filter(({ function: tool }) => {
     if (tool.name === "install_skill" && opts.permission === "review") return false;
@@ -4274,6 +4279,7 @@ async function runTool(opts, name, args) {
     throw new Error(`Model '${opts.model}' cannot use native image generation. Use generate_image_openai.`);
   }
   if (name === "get_runtime_context") return runtimeContext(opts);
+  if (name.startsWith('decision_')) return jsonResult(await runDecisionTool(name, args, opts));
 
   if (name === "agent_identity") {
     return jsonResult(activeAgentRuntime(opts).record);
@@ -4309,6 +4315,7 @@ async function runTool(opts, name, args) {
       scope: args.scope,
       acceptanceCriteria: args.acceptance_criteria,
       dependsOn: args.depends_on,
+      decisionDependencies: args.decision_dependencies,
       createdBy: opts.agentId
     }));
   }
@@ -6004,6 +6011,7 @@ async function processAgentTurns(opts, session) {
 }
 
 async function deliverPendingAgentMessages(opts, session, messages = null) {
+  await reconcileDecisionNotifications(opts.coordDir);
   const pending = messages || await readAgentInbox(opts.coordDir, opts.agentId);
   if (!pending.length) return false;
   const deliveredIds = new Set(Array.isArray(session.agentMessageIds) ? session.agentMessageIds : []);
@@ -6139,6 +6147,7 @@ async function waitForCoordinatedMessage(opts, session, request) {
     const result = await waitForAgentMessages(opts.coordDir, opts.agentId, {
       timeoutMs: request.timeoutMs,
       pollMs: 500,
+      beforePoll: () => reconcileDecisionNotifications(opts.coordDir),
       signal: controller.signal
     });
     if (result.timedOut) {
@@ -6571,6 +6580,10 @@ async function runMcpCommand(args) {
 
 async function run() {
   const argv = process.argv.slice(2);
+  if (argv[0] === 'decisions') {
+    process.stdout.write(`${JSON.stringify(await runDecisionsCli(argv.slice(1)), null, 2)}\n`);
+    return;
+  }
   if (argv[0] === "support") { openPersonalSupportPage(); process.stdout.write(`Opening ${PERSONAL_SUPPORT_URL}\n`); return; }
   if (["login", "auth"].includes(argv[0])) {
     if (!["codex", "claude"].includes(argv[1])) throw new Error("Usage: switchyard login|auth codex|claude");
@@ -6947,6 +6960,7 @@ async function run() {
     activeTerminalUi = opts.ui;
   }
   try {
+    await reconcileDecisionNotifications(opts.coordDir);
     opts.mcpManager = await createMcpManager({
       permission: opts.permission,
       approve: async ({ server, tool, args }) => askYesNo(`Allow MCP call ${server}.${tool}?\n${JSON.stringify(args).slice(0, 1600)}\n`),

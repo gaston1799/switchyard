@@ -1,5 +1,15 @@
 # Switchyard — coding-agent harness
 
+Decision Management v1 adds durable shared decisions with worker/coordinator/human
+authority, auditable history, task dependency blocking and revision conflicts.
+Model tools: `decision_create`, `decision_list`, `decision_get`, `decision_propose`,
+`decision_resolve`, `decision_escalate`, and `decision_history`. Operators use
+`switchyard decisions list|get|history|resolve`; human approvals are recorded
+through the operator CLI. See the [specification](docs/decision-management-v1.md),
+[workflow and examples](docs/decision-management-implementation.md), and
+[swarm guidance](skills/dsw-multi-agent/SKILL.md). Legacy aliases and data paths
+remain supported.
+
 > A local coding-agent harness for DeepSeek, GLM, Claude, GPT, and Reflection Beam. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
 
 `switchyard` opens the Electron desktop app with no arguments and forwards CLI arguments to the terminal harness. Use `d` or `dsw` for the interactive CLI; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.

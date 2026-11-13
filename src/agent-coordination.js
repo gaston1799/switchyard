@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { workspaceCoordinationDirectory } from "./data-store.js";
+import { getDecision, taskDecisionState, validateDecisionId } from './decisions.js';
 
 const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
@@ -392,6 +393,7 @@ export async function waitForAgentMessages(root, agentId, options = {}) {
   const pollMs = Math.min(Math.max(Number(options.pollMs) || 500, 50), 30000);
   const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY;
   while (Date.now() <= deadline) {
+    if (options.beforePoll) await options.beforePoll();
     const messages = await readAgentInbox(root, agentId, { max: options.max || 100 });
     if (messages.length) return { timedOut: false, messages };
     if (options.signal?.aborted) throw options.signal.reason || new Error("agent wait aborted");
@@ -407,6 +409,8 @@ export async function createTask(root, input = {}) {
   const title = String(input.title || input.description || taskId).trim();
   if (!title) throw new Error("task title must be non-empty.");
   const file = join(p.tasks, `${taskId}.json`);
+  const decisionDependencies = [...new Set((input.decisionDependencies || []).map(validateDecisionId))];
+  for (const id of decisionDependencies) await getDecision(root, id);
   try {
     await stat(file);
     throw new Error(`task '${taskId}' already exists.`);
@@ -421,6 +425,7 @@ export async function createTask(root, input = {}) {
     scope: Array.isArray(input.scope) ? input.scope.map(String) : [],
     acceptanceCriteria: Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria.map(String) : [],
     dependsOn: Array.isArray(input.dependsOn) ? input.dependsOn.map(validateTaskId) : [],
+    ...(decisionDependencies.length ? { decisionDependencies } : {}),
     createdBy: validateAgentId(input.createdBy),
     status: "open",
     createdAt: nowIso(),
@@ -446,24 +451,43 @@ export async function listTasks(root) {
       const task = await readJson(join(p.tasks, entry.name));
       let claim = null;
       try { claim = await readJson(join(p.claims, `${task.taskId}.json`)); } catch {}
-      tasks.push({ ...task, claim });
+      const observed = task.decisionRevisions || (claim && await claimDecisionRevisions(root, task.taskId, claim));
+      tasks.push({ ...task, claim, ...await taskDecisionState(root, task, observed) });
     } catch {}
   }
   return tasks.sort((a, b) => String(a.taskId).localeCompare(String(b.taskId)));
+}
+
+function decisionAcknowledgementPath(root, taskId, claim) {
+  const leaseKey = createHash('sha256').update(JSON.stringify([claim.agentId, claim.claimedAt, claim.leaseExpiresAt])).digest('hex').slice(0, 32);
+  return join(paths(root).claims, `${validateTaskId(taskId)}.decisions-${leaseKey}.json`);
+}
+
+async function claimDecisionRevisions(root, taskId, claim) {
+  try { return await readJson(decisionAcknowledgementPath(root, taskId, claim)); }
+  catch (error) {
+    if (isMissing(error)) return claim.decisionRevisions;
+    // Unreadable acknowledgements never authorize a handoff. Explicit review
+    // and reclaim are required; keep the affected task visible in listings.
+    return {};
+  }
 }
 
 export async function claimTask(root, input = {}) {
   const p = await initializeCoordination(root);
   const taskId = validateTaskId(input.taskId);
   const agentId = validateAgentId(input.agentId);
-  await stat(join(p.tasks, `${taskId}.json`));
+  const task = await readJson(join(p.tasks, `${taskId}.json`));
+  const decisionState = await taskDecisionState(root, task);
+  if (decisionState.decisionBlockers.length) throw new Error(`Task '${taskId}' blocked by unresolved decisions: ${JSON.stringify(decisionState.decisionBlockers)}`);
   const leaseSeconds = Math.min(Math.max(Number(input.leaseSeconds) || 1800, 30), 86400);
   const claim = {
     schemaVersion: 1,
     taskId,
     agentId,
     claimedAt: nowIso(),
-    leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1000).toISOString()
+    leaseExpiresAt: new Date(Date.now() + leaseSeconds * 1000).toISOString(),
+    ...(task.decisionDependencies?.length ? { decisionRevisions: decisionState.decisionRevisions } : {})
   };
   const file = join(p.claims, `${taskId}.json`);
   try {
@@ -473,7 +497,19 @@ export async function claimTask(root, input = {}) {
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     const existing = await readJson(file);
-    if (existing.agentId === agentId) return existing;
+    if (existing.agentId === agentId) {
+      if (task.decisionDependencies?.length && JSON.stringify(await claimDecisionRevisions(root, taskId, existing)) !== JSON.stringify(claim.decisionRevisions)) {
+        // Reclaiming explicitly acknowledges that changed decisions have been
+        // reviewed. Handoff still checks again, including after restart.
+        const refreshed = { ...existing, decisionRevisions: claim.decisionRevisions };
+        // A lease-specific sidecar cannot overwrite a concurrent replacement
+        // owner's claim. Old readers ignore it; new handoffs read it durably.
+        await writeJsonAtomic(decisionAcknowledgementPath(root, taskId, existing), claim.decisionRevisions);
+        await appendEvent(root, 'task_decisions_revalidated', { taskId, agentId, decisionRevisions: claim.decisionRevisions });
+        return refreshed;
+      }
+      return { ...existing, ...(task.decisionDependencies?.length ? { decisionRevisions: await claimDecisionRevisions(root, taskId, existing) } : {}) };
+    }
     const expiresAt = Date.parse(existing.leaseExpiresAt || "");
     if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
       const expiredFile = join(p.claims, `${taskId}.expired-${Date.now()}-${randomUUID()}.json`);
@@ -501,11 +537,16 @@ export async function completeTask(root, input = {}) {
   try { claim = await readJson(join(p.claims, `${taskId}.json`)); }
   catch (error) { if (isMissing(error)) throw new Error(`task '${taskId}' is not claimed.`); throw error; }
   if (claim.agentId !== agentId) throw new Error(`task '${taskId}' is claimed by '${claim.agentId}', not '${agentId}'.`);
+  const decisionState = await taskDecisionState(root, task, await claimDecisionRevisions(root, taskId, claim) || {});
+  if (String(input.status || 'ready_for_review') !== 'blocked' && (decisionState.decisionBlockers.length || decisionState.needsRevalidation)) {
+    throw new Error(`Task '${taskId}' requires decision approval/revalidation. Review decision_get, then agent_claim again before handoff.`);
+  }
   const completed = {
     ...task,
     status: String(input.status || "ready_for_review"),
     result: String(input.summary || ""),
     completedBy: agentId,
+    ...(task.decisionDependencies?.length ? { decisionRevisions: decisionState.decisionRevisions } : {}),
     updatedAt: nowIso()
   };
   await writeJsonAtomic(taskFile, completed);

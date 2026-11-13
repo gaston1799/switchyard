@@ -1,11 +1,35 @@
 ---
 name: dsw-multi-agent
-description: Coordinate multiple dsw agents with stable IDs, durable messages, bounded task claims, handoffs, coordinator-only spawning/resume, context compaction, and parked wait/wake sessions.
+description: Coordinate Switchyard agents with stable IDs, durable messages, bounded task claims, shared decisions, handoffs, coordinator-only spawning/resume, context compaction, and parked wait/wake sessions.
 ---
 
-# dsw multi-agent coordination
+# Switchyard multi-agent coordination
 
-Every dsw session has an `agent_id`, even when `--agent-id` is omitted. Use:
+The historical `dsw-multi-agent` skill ID and CLI aliases remain compatible.
+
+## Decision workflow
+
+Read `switchyard-decisions` for the full procedure. Check `decision_list` before
+dependent work; coordinators also review pending questions on startup/replacement.
+Use `decision_create/get/propose/resolve/escalate/history` for durable records.
+Workers resolve only their own routine implementation choices within approved
+requirements. Escalate unresolved, consequential and cross-agent questions to the
+assigned coordinator. Coordinators resolve technical questions and research product
+options; product behavior, UX, business rules, pricing, legal ownership and major
+security/financial decisions require the founder. Include all applicable categories;
+highest authority wins. Never invent human approval or run the operator resolution
+command on the founder's behalf. Batch nonurgent questions with context, trade-offs
+and a recommendation. Use explicit supersession to deduplicate related questions.
+
+Declare task `decision_dependencies`. Unresolved decisions block only dependent
+tasks. After approval, resume dependent work; approval wakes registered parked
+recipients, while stopped agents use explicit resume. Changes expose affected
+tasks and `needsRevalidation`: review the new revision, revalidate work and call
+`agent_claim` again before handoff. Decision mutations need `expected_revision`;
+reload and review conflicts. Human operators use `switchyard decisions list`,
+`get`, `resolve` and `history`.
+
+Every Switchyard session has an `agent_id`, even when `--agent-id` is omitted. Use:
 
 - `agent_identity` to confirm your own ID, role, mission, workspace, and state.
 - `agent_list` to discover live peers before planning or delegating.
@@ -26,11 +50,11 @@ Do not edit a scope claimed by another agent unless it explicitly hands the task
 
 ## Resuming agents and sessions
 
-- In the interactive startup flow, API-backed new runs ask whether this session is a **Coordinator** or **Worker**. The flow creates a stable agent ID and uses `.deepseek-watch/coordination` as the shared board by default; enter the same absolute directory in every worktree to share a board across them. Coordinators can enter a mission; workers can enter a coordinator ID and mission, or leave the ID blank to discover a coordinator from the board.
+- In the interactive startup flow, API-backed new runs ask whether this session is a **Coordinator** or **Worker**. The flow creates a stable agent ID and uses the central per-workspace board under `~/.switchyard/coordination/workspaces/` by default (or an explicit legacy `--coord-dir`); enter the same absolute directory in every worktree to share a board across them. Coordinators can enter a mission; workers can enter a coordinator ID and mission, or leave the ID blank to discover a coordinator from the board.
 - Native Codex and Claude sessions cannot join this board yet because their provider-owned tool loops do not expose Switchyard coordination tools. Choose an API-backed connection for swarm roles.
 
-- `d --resume` in a workspace whose `.deepseek-watch/coordination` has agents now offers a combined picker: **coordination agents first** (id, state, session), then saved sessions. Picking an agent resumes that agent's session and identity.
-- `d --agent-id <existing>` (no `--session`, no `--new`) auto-resumes that agent's most recent session — via the workspace session list, falling back to the agent's **coordination record** (which stores the definitive absolute session path, so it works from any cwd).
+- `switchyard --resume` with a shared coordination board containing agents now offers a combined picker: **coordination agents first** (id, state, session), then saved sessions. Picking an agent resumes that agent's session and identity.
+- `switchyard --agent-id <existing>` (no `--session`, no `--new`) auto-resumes that agent's most recent session — via the workspace session list, falling back to the agent's **coordination record** (which stores the definitive absolute session path, so it works from any cwd).
 - Resuming an id that is **currently live** fails with "already active" — one process per id.
 
 ## Coordinator-only swarm growth
@@ -54,10 +78,10 @@ Sessions auto-compact at `--compact-at` (default 0.9) of the messages budget (`-
 ## Operator commands
 
 ```powershell
-d agents --coord-dir D:\MyServer\.deepseek-watch\coordination
-d message worker-1 "Please report current status." --coord-dir D:\MyServer\.deepseek-watch\coordination
-d wake worker-1 "The dependency is ready; continue." --coord-dir D:\MyServer\.deepseek-watch\coordination
-d tasks --coord-dir D:\MyServer\.deepseek-watch\coordination
+switchyard agents --coord-dir D:\MyServer\.deepseek-watch\coordination
+switchyard message worker-1 "Please report current status." --coord-dir D:\MyServer\.deepseek-watch\coordination
+switchyard wake worker-1 "The dependency is ready; continue." --coord-dir D:\MyServer\.deepseek-watch\coordination
+switchyard tasks --coord-dir D:\MyServer\.deepseek-watch\coordination
 ```
 
 `agent_wait` parks indefinitely when `timeout_seconds` is omitted or zero. A finite timeout resumes the model with an explicit timeout event.
@@ -65,5 +89,5 @@ d tasks --coord-dir D:\MyServer\.deepseek-watch\coordination
 ## Example launch
 
 ```powershell
-d --agent-id coordinator --agent-role coordinator --agent-mission "Plan, delegate, and review; do not implement worker tasks." --coord-dir D:\MyServer\.deepseek-watch\coordination -p "Explore the repository, discover agents, and coordinate the remaining work."
+switchyard --agent-id coordinator --agent-role coordinator --agent-mission "Plan, delegate, and review; do not implement worker tasks." --coord-dir D:\MyServer\.deepseek-watch\coordination -p "Explore the repository, discover agents, and coordinate the remaining work."
 ```
