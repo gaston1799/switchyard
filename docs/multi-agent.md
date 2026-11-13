@@ -17,6 +17,12 @@ When a worker knows the coordinator ID, pass `--coordinator-id` (or set `DEEPSEE
 
 ## Operator commands
 
+Externally registered harnesses can observe the board with `switchyard events
+watch|poll|ack` and a supported harness adapter. Keep their shell heartbeat separate.
+Claude Code supports a native Monitor adapter and an opt-in interactive plugin;
+other harnesses use callbacks, bounded waits or polling as supported. See the
+[external-harness integration plan and protocol](external-harness-integration.md).
+
 ```powershell
 switchyard agents --coord-dir D:\MyServer\.deepseek-watch\coordination
 switchyard agents --all --json --coord-dir D:\MyServer\.deepseek-watch\coordination
@@ -70,6 +76,7 @@ Implementation and focused tests are ready for review.
   claims/       atomic task leases
   events/       append-only coordination events
   decisions/    immutable revisions and auditable decision history
+  subscriptions/ per-external-session notification receipts; separate from inbox acknowledgements
 ```
 
 The wrapper heartbeat marks live processes. `switchyard agents` shows live agents by default; `--all` includes completed, failed, stopped, and stale records. Messages to a busy agent are delivered at a model/tool boundary. A parked wrapper has no active model request while waiting.

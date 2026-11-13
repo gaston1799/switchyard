@@ -10,6 +10,12 @@ through the operator CLI. See the [specification](docs/decision-management-v1.md
 [swarm guidance](skills/dsw-multi-agent/SKILL.md). Legacy aliases and data paths
 remain supported.
 
+External harnesses can receive structured board events with `switchyard events
+watch|poll|ack`. The [Claude Code adapter/plugin](integrations/claude-code/README.md)
+uses native Monitor notifications; heartbeat remains independent. Other harnesses
+use supported callbacks, waits or polling through the same watcher. See the
+[integration plan and replay contract](docs/external-harness-integration.md).
+
 > A local coding-agent harness for DeepSeek, GLM, Claude, GPT, and Reflection Beam. Streams responses, calls workspace tools, resumes sessions, and coordinates detached agents.
 
 `switchyard` opens the Electron desktop app with no arguments and forwards CLI arguments to the terminal harness. Use `d` or `dsw` for the interactive CLI; `dsd` and `dswait` remain available. Existing configuration and session paths are preserved. The npm package identifier remains `deepseek-detached-agent`.

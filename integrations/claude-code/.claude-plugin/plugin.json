@@ -1,0 +1,7 @@
+{
+  "name": "switchyard-events",
+  "version": "0.1.0",
+  "description": "Observe a Switchyard coordination board through Claude Code's native plugin monitor without changing heartbeat or decision authority.",
+  "author": { "name": "Switchyard contributors" },
+  "experimental": { "monitors": "./monitors/monitors.json" }
+}

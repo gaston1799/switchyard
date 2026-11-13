@@ -64,6 +64,7 @@ import { switchyardDataRoot } from "./data-store.js";
 import { TOOLPACKS, TOOLPACK_DISCOVERY_SCHEMAS, toolpackSchemas, toolpackForTool, slackRequest } from './toolpacks.js';
 import { modelPrice } from './model-pricing.js';
 import { DECISION_TOOL_SCHEMAS, reconcileDecisionNotifications, runDecisionTool, runDecisionsCli } from './decision-tools.js';
+import { runEventsCli } from './event-cli.js';
 import { usageTotals } from './ui/dashboard-model.cjs';
 
 const DEFAULT_PROVIDER = "deepseek";
@@ -95,6 +96,7 @@ Usage:
   switchyard wake <agent-id> [message] [--from <agent-id>] [--coord-dir <dir>]
   switchyard inbox <agent-id> [--coord-dir <dir>]
   switchyard tasks [--coord-dir <dir>]
+  switchyard events watch|poll|ack|adapter|adapters [--coord-dir <dir>] [--agent-id <id>] [--consumer <id>]
   switchyard decisions list|get <id>|history <id>|resolve <id> [--coord-dir <dir>]
     resolve requires --expected-revision <n> --resolution <text> --reasoning <text> [--status approved|rejected|...]
   switchyard security allow <domain>
@@ -6580,6 +6582,7 @@ async function runMcpCommand(args) {
 
 async function run() {
   const argv = process.argv.slice(2);
+  if (argv[0] === 'events') { await runEventsCli(argv.slice(1)); return; }
   if (argv[0] === 'decisions') {
     process.stdout.write(`${JSON.stringify(await runDecisionsCli(argv.slice(1)), null, 2)}\n`);
     return;

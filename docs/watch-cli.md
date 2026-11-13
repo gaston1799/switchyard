@@ -1,5 +1,10 @@
 # Watch CLI
 
+For external harness notifications, use `switchyard events watch|poll|ack` or
+`switchyard events adapter claude-code`; see the
+[event stream and harness adapters](external-harness-integration.md). This observer
+does not replace the existing agent heartbeat or decision/task interfaces.
+
 Switchyard's decision commands are `switchyard decisions list|get|history|resolve`.
 See [Decision Management v1](decision-management-implementation.md) for authority,
 resolution examples, task dependencies and recovery. The historical command and
