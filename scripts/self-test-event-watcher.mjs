@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, cp } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -245,14 +246,16 @@ test('Claude adapter matches required Monitor input, shell-quotes paths, and enf
   assert.equal(call.input.description, 'Switchyard events for worker');
   assert.equal(call.input.timeout_ms, 600000);
   assert.equal(call.input.ws, undefined);
-  const result = spawnSync('bash', ['-c', call.input.command], { encoding: 'utf8' });
+  // On Windows plain `bash` can be WSL's, which cannot run host paths. Claude's Monitor uses Git Bash.
+  const bash = process.platform === 'win32' ? ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe'].find(existsSync) ?? 'bash' : 'bash';
+  const result = spawnSync(bash, ['-c', call.input.command], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), ['events', 'watch', '--coord-dir', root, '--agent-id', 'worker', '--consumer', 'session-one']);
   assert.throws(() => claudeMonitorCall({ ...options(root), cliPath: CLI, mode: 'print', timeoutMs: 600001 }), /600000/);
   assert.throws(() => claudeMonitorCall({ ...options(root), cliPath: CLI, timeoutMs: 1800001 }), /1800000/);
   assert.throws(() => claudeMonitorCall({ ...options(root), cliPath: CLI, mode: 'unknown' }), /mode/);
   const standalone = claudeMonitorCall({ ...options(root), cliPath: '/opt/switchyard.exe', standalone: true });
-  assert.ok(standalone.input.command.startsWith("'/opt/switchyard.exe' 'events' 'watch'"));
+  assert.ok(standalone.input.command.startsWith(`'${resolve('/opt/switchyard.exe').replaceAll("'", "'\\''")}' 'events' 'watch'`));
 });
 
 test('opt-in plugin wrapper carries real NDJSON, leaves heartbeat intact and replays only unacknowledged events', async t => {
