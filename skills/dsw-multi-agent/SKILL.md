@@ -7,6 +7,38 @@ description: Coordinate Switchyard agents with stable IDs, durable messages, bou
 
 The historical `dsw-multi-agent` skill ID and CLI aliases remain compatible.
 
+## External harness notifications
+
+Keep three components separate: **existing shell heartbeat**, the provider-independent
+**Switchyard event watcher**, and the **harness-specific notification adapter**.
+Preserve the existing external heartbeat/registration and use its absolute board
+and agent ID. Watchers do not establish liveness or acquire decision authority.
+
+In Claude Code, use the native `Monitor` tool, not a silent background Bash tail:
+`switchyard events adapter claude-code --agent-id ID --consumer STABLE-SESSION-ID
+--coord-dir /shared/board` returns the native tool input. Pass that `input` to
+Monitor only after checking availability and permissions. Each stdout line is one
+structured event; heartbeat rewrites and quiet polls emit nothing. Renew an expired
+manual Monitor with the same consumer (default 5 minutes, max 30 interactive / 10
+for `-p`). An opt-in plugin in `integrations/claude-code/` can start a persistent
+monitor automatically in interactive sessions; plugin monitors do not start in
+`-p` runs. Check `/tasks` before starting another watch. Read its setup and
+`docs/external-harness-integration.md` for current version/platform limitations.
+
+Deduplicate by `eventId` and inspect current authoritative state before acting.
+After durably recording/handling receipt, run `switchyard events ack EVENT_ID`
+with the same board, agent ID and consumer. Writing stdout is not acknowledgement.
+Unacknowledged events replay after crash/reconnect/expiration; handlers must be
+idempotent. This receipt does not consume the inbox, approve decisions or claim
+tasks. It never substitutes for founder approval.
+
+Other harnesses use a supported callback, background-task completion notification,
+bounded `switchyard events poll --wait-ms 30000`, or ordinary polling. Do not assume
+they implement Claude Monitor or use undocumented stdin/terminal injection. Native
+Switchyard Claude runs in print/stream-json mode, so do not assume the interactive
+plugin autostarts there. Closed sessions require the harness's supported resume
+mechanism; neither a heartbeat nor an event file can wake an ended model process.
+
 ## Decision workflow
 
 Read `switchyard-decisions` for the full procedure. Check `decision_list` before
@@ -51,7 +83,7 @@ Do not edit a scope claimed by another agent unless it explicitly hands the task
 ## Resuming agents and sessions
 
 - In the interactive startup flow, API-backed new runs ask whether this session is a **Coordinator** or **Worker**. The flow creates a stable agent ID and uses the central per-workspace board under `~/.switchyard/coordination/workspaces/` by default (or an explicit legacy `--coord-dir`); enter the same absolute directory in every worktree to share a board across them. Coordinators can enter a mission; workers can enter a coordinator ID and mission, or leave the ID blank to discover a coordinator from the board.
-- Native Codex and Claude sessions cannot join this board yet because their provider-owned tool loops do not expose Switchyard coordination tools. Choose an API-backed connection for swarm roles.
+- Native Codex and Claude provider-owned tool loops do not automatically expose Switchyard's API-backed coordination tools. An externally registered session may observe the board through the event watcher and its supported notification adapter; this does not grant model-tool mutation authority. Choose an API-backed connection for the existing complete swarm tool workflow.
 
 - `switchyard --resume` with a shared coordination board containing agents now offers a combined picker: **coordination agents first** (id, state, session), then saved sessions. Picking an agent resumes that agent's session and identity.
 - `switchyard --agent-id <existing>` (no `--session`, no `--new`) auto-resumes that agent's most recent session — via the workspace session list, falling back to the agent's **coordination record** (which stores the definitive absolute session path, so it works from any cwd).

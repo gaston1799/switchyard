@@ -8,7 +8,10 @@ description: Manage durable Switchyard decisions, escalate to coordinators or th
 Use the running Switchyard agent's shared coordination board. Decisions survive
 session restart, coordinator replacement and migration; messages alone never
 constitute approval. Native Claude/Codex sessions still need an API-backed
-Switchyard connection for these model tools.
+Switchyard connection for these model tools. External sessions can receive
+decision notifications through `switchyard events watch` and a supported harness
+adapter (Claude's native Monitor or its opt-in plugin). Event receipts never
+change decision authority; see `docs/external-harness-integration.md`.
 
 1. Check `decision_list` before dependent work. Coordinators review unresolved
    questions on startup, including after replacing another coordinator.
